@@ -9,10 +9,11 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 from PIL.ImageQt import ImageQt
-from PySide6.QtCore import QEvent, QEventLoop, QObject, QRectF, QSettings, QSize, Qt, QThread, Signal
+from PySide6.QtCore import QEvent, QEventLoop, QObject, QRect, QRectF, QSettings, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
+    QGraphicsDropShadowEffect,
     QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
@@ -209,18 +210,68 @@ class FileList(QTreeWidget):
         p.end()
 
 
-class PreviewLabel(QLabel):
-    """미리보기. 그림을 누르면 누른 위치를 그림 크기에 대한 비율(0~1)로 알려 준다."""
+class PreviewCanvas(QWidget):
+    """미리보기. 원본 이미지를 다시 확대해 만들지 않고, 화면에 보이는 부분만 원하는 배율로 그린다.
+
+    확대·축소할 때 큰 이미지를 매번 새로 만들지 않으므로 핀치·스크롤 확대가 부드럽다.
+    그림을 누르면 누른 위치를 그림 크기에 대한 비율(0~1)로 알려 준다.
+    """
     clicked = Signal(float, float)
 
-    def mousePressEvent(self, e):
-        pm = self.pixmap()
-        if pm is None or pm.isNull() or e.button() != Qt.LeftButton:
+    def __init__(self, text):
+        super().__init__()
+        self.pix = None
+        self.text = text
+        self.disp = QSize(0, 0)
+        self.fast = False  # 핀치 중에는 빠른 보간으로 그린다
+
+    def set_image(self, pix):
+        self.pix = pix
+        self.update()
+
+    def clear(self, text):
+        self.pix, self.text, self.disp = None, text, QSize(0, 0)
+        self.setMinimumSize(0, 0)
+        self.update()
+
+    def set_display(self, w, h):
+        self.disp = QSize(w, h)
+        self.setMinimumSize(w, h)  # 확대하면 스크롤 영역이 그만큼 커진다
+        self.update()
+
+    def image_rect(self):
+        return QRect(max(0, (self.width() - self.disp.width()) // 2), 0, self.disp.width(), self.disp.height())
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        if self.pix is None or self.disp.isEmpty():
+            p.setPen(QColor(style.MUTED))
+            p.drawText(self.rect(), Qt.AlignCenter, self.text)
             return
-        ox = (self.width() - pm.width()) / 2  # 가로 가운데 정렬
-        x, y = e.position().x() - ox, e.position().y()
-        if 0 <= x < pm.width() and 0 <= y < pm.height():
-            self.clicked.emit(x / pm.width(), y / pm.height())
+        r = self.image_rect()
+        vis = r.intersected(e.rect())
+        if vis.isEmpty():
+            return
+        sx, sy = self.pix.width() / r.width(), self.pix.height() / r.height()
+        src = QRectF((vis.x() - r.x()) * sx, (vis.y() - r.y()) * sy, vis.width() * sx, vis.height() * sy)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, not self.fast)
+        p.drawPixmap(QRectF(vis), self.pix, src)
+
+    def mousePressEvent(self, e):
+        if self.pix is None or e.button() != Qt.LeftButton:
+            return
+        r = self.image_rect()
+        x, y = e.position().x() - r.x(), e.position().y() - r.y()
+        if 0 <= x < r.width() and 0 <= y < r.height():
+            self.clicked.emit(x / r.width(), y / r.height())
+
+
+def rounded_menu(parent):
+    """둥근 모서리가 제대로 보이는 메뉴 (창 배경을 투명하게 해 사각 모서리를 없앤다)."""
+    menu = QMenu(parent)
+    menu.setWindowFlags(menu.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+    menu.setAttribute(Qt.WA_TranslucentBackground, True)
+    return menu
 
 
 def swatch(rgb, size=14):
@@ -233,16 +284,27 @@ def swatch(rgb, size=14):
     return QIcon(pm)
 
 
-class ColorPicker(QFrame):
+class ColorPicker(QWidget):
     """조각 색 고르기 팝업. 상단 고정(지금 상태·비우기·새 레이어) + 한 열 색 목록(최대 높이 안에서 스크롤)."""
     MAX_H = 420
 
     def __init__(self, parent, current, entries, can_clear):
-        super().__init__(parent, Qt.Popup)
-        self.setObjectName("picker")
-        self.setAttribute(Qt.WA_StyledBackground, True)
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        # 창은 투명하게, 안쪽 카드에만 둥근 모서리와 그림자를 준다 (창이 사각이면 모서리가 각져 보인다)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.choice = False
-        lay = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 6, 10, 14)
+        card_ = QFrame()
+        card_.setObjectName("picker")
+        card_.setAttribute(Qt.WA_StyledBackground, True)
+        shadow = QGraphicsDropShadowEffect(card_)
+        shadow.setBlurRadius(24)
+        shadow.setOffset(0, 6)
+        shadow.setColor(QColor(0, 0, 0, 45))
+        card_.setGraphicsEffect(shadow)
+        outer.addWidget(card_)
+        lay = QVBoxLayout(card_)
         lay.setContentsMargins(4, 6, 4, 4)
         lay.setSpacing(2)
         head = label(f"지금: {current}", "pickerHead")
@@ -274,7 +336,7 @@ class ColorPicker(QFrame):
         row_h = 30
         top_h = lay.sizeHint().height() - self.list.sizeHint().height()
         self.list.setFixedHeight(max(row_h, min(len(entries) * row_h + 6, self.MAX_H - top_h - 10)))
-        self.setFixedWidth(230)
+        card_.setFixedWidth(230)
 
     def done(self, data):
         self.choice = data
@@ -422,10 +484,12 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
 
         # 미리보기 탭
-        self.preview = PreviewLabel("완료된 파일을 고르면\n미리보기가 나옵니다")
+        self.preview = PreviewCanvas("완료된 파일을 고르면\n미리보기가 나옵니다")
         self.preview.clicked.connect(self.on_preview_click)
-        self.preview.setObjectName("empty")
-        self.preview.setAlignment(Qt.AlignCenter)
+        self.sharpen = QTimer(self)  # 핀치가 멈추면 부드러운 보간으로 다시 그린다
+        self.sharpen.setSingleShot(True)
+        self.sharpen.setInterval(150)
+        self.sharpen.timeout.connect(self.end_fast_zoom)
         self.scroll = QScrollArea()
         self.scroll.setObjectName("preview")
         self.scroll.setWidgetResizable(True)
@@ -869,7 +933,7 @@ class MainWindow(QMainWindow):
             items = [item]
         rows = [self.files.indexOfTopLevelItem(i) for i in items]
         running = self.worker is not None
-        menu = QMenu(self)
+        menu = rounded_menu(self)
         run = menu.addAction(f"선택한 파일만 칠하기 ({len(rows)}개)")
         run.setEnabled(not running)
         menu.addSeparator()
@@ -1059,9 +1123,7 @@ class MainWindow(QMainWindow):
             b.setEnabled(result is not None)
         if result is None or result.preview is None:
             self.preview_pix = None
-            self.preview.setPixmap(QPixmap())
-            self.preview.setAlignment(Qt.AlignCenter)
-            self.preview.setText("완료된 파일을 고르면\n미리보기가 나옵니다")
+            self.preview.clear("완료된 파일을 고르면\n미리보기가 나옵니다")
             self.preview_info.setText("")
             self.update_edit_bar()
             return
@@ -1069,20 +1131,22 @@ class MainWindow(QMainWindow):
         self.preview_pix = QPixmap.fromImage(self._qimage)
         if _prev is not None:  # 다른 파일을 고르면 폭 맞춤으로 돌아간다
             self.zoom = 1.0
-        self.preview.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.preview_info.setText(self.describe(result))
         self.fit_preview()
         self.update_edit_bar()
 
     def fit_preview(self):
         if self.preview_pix is None:
-            self.preview.setMinimumSize(0, 0)
             return
         w = max(50, round((self.scroll.viewport().width() - 4) * self.zoom))
-        pm = self.preview_pix.scaledToWidth(w, Qt.SmoothTransformation)
-        self.preview.setPixmap(pm)
-        self.preview.setMinimumSize(pm.size())  # 확대하면 스크롤 영역이 그만큼 커진다
+        h = max(1, round(w * self.preview_pix.height() / self.preview_pix.width()))
+        self.preview.set_image(self.preview_pix)
+        self.preview.set_display(w, h)
         self.zoom_label.setText(f"{round(self.zoom * 100)}%")
+
+    def end_fast_zoom(self):
+        self.preview.fast = False
+        self.preview.update()
 
     def set_zoom(self, zoom, anchor=None):
         """배율을 바꾼다. anchor(뷰포트 좌표)가 있으면 그 점이 제자리에 있게 스크롤을 맞춘다."""
@@ -1150,6 +1214,8 @@ class MainWindow(QMainWindow):
             # 트랙패드 핀치 확대·축소 (macOS)
             if t == QEvent.NativeGesture and e.gestureType() == Qt.ZoomNativeGesture:
                 pos = self.scroll.viewport().mapFromGlobal(e.globalPosition().toPoint())
+                self.preview.fast = True  # 핀치 중에는 빠르게, 멈추면 다시 부드럽게
+                self.sharpen.start()
                 self.set_zoom(self.zoom * (1 + e.value()), pos)
                 return True
         return super().eventFilter(obj, e)
