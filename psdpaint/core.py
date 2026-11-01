@@ -113,12 +113,28 @@ def quantize(rgb, tol, min_share):
     return idx, colors
 
 
-def _folder_hints(group, src_psd, key_map, keys):
+def check_lines(rgba, boundary, what):
+    """레퍼런스에 그려진 선이 원고 선화와 겹치는지 본다. 다른 페이지를 칠한 레퍼런스면 멈춘다."""
+    dark = (rgba[..., 3] >= 250) & (rgba[..., :3].max(-1) < 80)
+    # 진한 색 점·면(신발, 양말 힌트 등)은 빼고 가는 선만 본다
+    dark &= ~(cv2.morphologyEx(dark.astype(np.uint8), cv2.MORPH_OPEN, _disk(3)) > 0)
+    if dark.sum() < 2000:  # 선 없이 색만 칠한 레퍼런스는 확인할 수 없다
+        return
+    near = cv2.dilate(boundary.astype(np.uint8), _disk(3)) > 0
+    ratio = (dark & near).sum() / dark.sum()
+    if ratio < 0.4:
+        raise PaintError(f"{what}의 선이 이 원고의 선화와 맞지 않습니다 (겹침 {ratio:.0%}). "
+                         "다른 페이지를 칠한 레퍼런스로 보입니다. 같은 페이지를 칠한 레퍼런스를 쓰세요")
+
+
+def _folder_hints(group, src_psd, key_map, keys, boundary=None):
     """폴더의 하위 레이어마다 이름과 색을 힌트로 읽는다. 아래 레이어부터 칠해 위 레이어가 덮는다."""
     for layer in group:
         if layer.is_group():
             continue
         rgba = psdio.canvas_rgba(layer, src_psd)
+        if boundary is not None:
+            check_lines(rgba, boundary, f"참고 레이어 '{layer.name}'")
         solid = rgba[..., 3] >= 250
         if not solid.any():
             continue
@@ -151,7 +167,7 @@ def _check_size(w, h, psd, what):
                          "같은 페이지를 칠한 레퍼런스만 쓸 수 있습니다")
 
 
-def read_hints(psd, opts, psd_path=None):
+def read_hints(psd, opts, psd_path=None, boundary=None):
     """참고 힌트 → (힌트 키 맵, 키별 (레이어 이름, RGB), 레이어 이름 순서(위→아래), 이미지 방식 여부).
 
     opts.hint_source에 따라 힌트를 읽는다.
@@ -169,7 +185,10 @@ def read_hints(psd, opts, psd_path=None):
             raise PaintError("레퍼런스 이미지를 지정하세요")
         im = Image.open(opts.hint_path)
         _check_size(*im.size, psd, "레퍼런스 이미지")
-        keys = _image_hints(load_sidecar(opts.hint_path, psd), opts, key_map)
+        rgba = load_sidecar(opts.hint_path, psd)
+        if boundary is not None:
+            check_lines(rgba, boundary, "레퍼런스 이미지")
+        keys = _image_hints(rgba, opts, key_map)
         image_mode = True
     elif opts.hint_source == "psd":
         if not opts.hint_path or not Path(opts.hint_path).exists():
@@ -189,11 +208,14 @@ def read_hints(psd, opts, psd_path=None):
     else:
         hint = psdio.find(psd, opts.hint_group)
         if hint is not None and hint.is_group():
-            _folder_hints(hint, psd, key_map, keys)
+            _folder_hints(hint, psd, key_map, keys, boundary)
             if not keys and not opts.auto_fill:
                 raise PaintError(f"'{opts.hint_group}' 폴더 안에 힌트가 없습니다")
         elif hint is not None:
-            keys = _image_hints(psdio.canvas_rgba(hint, psd), opts, key_map)
+            rgba = psdio.canvas_rgba(hint, psd)
+            if boundary is not None:
+                check_lines(rgba, boundary, f"참고 레이어 '{hint.name}'")
+            keys = _image_hints(rgba, opts, key_map)
             image_mode = True
         elif psd_path and (sidecar := find_sidecar(psd_path)):
             keys = _image_hints(load_sidecar(sidecar, psd), opts, key_map)
@@ -457,7 +479,7 @@ def paint(psd_path, out_path, opts=None, progress=None):
     say("선화 영역 나누는 중", 0.15)
     line_group, boundary, frame, labels, n = segment(psd, opts)
     say("참고 레이어 읽는 중", 0.3)
-    key_map, keys, names, image_mode = read_hints(psd, opts, psd_path)
+    key_map, keys, names, image_mode = read_hints(psd, opts, psd_path, boundary)
     say("영역에 힌트 대응하는 중", 0.4)
     region_key = assign_hints(labels, n, key_map, opts, dense=image_mode or opts.hint_source == "psd")
     if image_mode:
