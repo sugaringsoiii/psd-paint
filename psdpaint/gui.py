@@ -20,7 +20,7 @@ import threading
 
 from . import ai, style
 from .cli import output_path
-from .core import Options, PaintError, paint
+from .core import AwaitingAnswer, Options, PaintError, paint
 
 APP_NAME = "psd-paint"
 COL_FILE, COL_STATUS, COL_INFO = range(3)
@@ -66,6 +66,7 @@ class Worker(QObject):
     progressed = Signal(int, str, float)
     finished_file = Signal(int, object, float)
     failed_file = Signal(int, str)
+    waiting_file = Signal(int, str)
     all_done = Signal()
 
     def __init__(self, jobs, opts):
@@ -85,6 +86,8 @@ class Worker(QObject):
                 result = paint(src, dst, self.opts,
                                progress=lambda msg, frac, row=row: self.progressed.emit(row, msg, frac))
                 self.finished_file.emit(row, result, time.time() - t)
+            except AwaitingAnswer as e:
+                self.waiting_file.emit(row, str(e))
             except PaintError as e:
                 self.failed_file.emit(row, str(e))
             except FileNotFoundError:
@@ -361,8 +364,8 @@ class MainWindow(QMainWindow):
         self.src_layer = QRadioButton("파일 안 참고 레이어")
         self.src_layer.setToolTip("PSD 안의 '참고' 폴더(점·낙서 힌트) 또는 칠해 둔 '참고' 레이어를 봅니다.\n"
                                   "없으면 PSD 옆의 '파일이름_참고.png'를 찾고, 그것도 없으면 자동으로 칠합니다")
-        self.src_image = QRadioButton("레퍼런스 이미지 (PNG·JPG)")
-        self.src_psd = QRadioButton("레퍼런스 PSD")
+        self.src_image = QRadioButton("레퍼런스 이미지 (PNG·JPG) · AI")
+        self.src_psd = QRadioButton("레퍼런스 PSD (캐릭터 시트·채색 참고) · AI")
         self.src_psd.setToolTip("밑색이 칠해진 PSD. 그 안의 '밑색'(또는 '참고') 폴더 레이어 이름과 색을 그대로 씁니다")
         src_group = QButtonGroup(w)
         for b in (self.src_layer, self.src_image, self.src_psd):
@@ -372,8 +375,8 @@ class MainWindow(QMainWindow):
         self.hint_path.setPlaceholderText("레퍼런스 파일")
         self.hint_browse = QPushButton("찾기")
         self.hint_browse.clicked.connect(self.pick_hint_path)
-        ref_note = label("같은 페이지(같은 크기)를 칠한 레퍼런스만 쓸 수 있습니다. "
-                         "다른 페이지를 보고 칠하는 기능은 AI 연결로 준비 중입니다.", "summary")
+        ref_note = label("다른 페이지·캐릭터 시트는 AI가 인물과 부위를 맞춰 칠합니다 (아래 AI 연결). "
+                         "같은 페이지를 칠한 레퍼런스면 AI 없이 바로 칠합니다.", "summary")
         ref_note.setWordWrap(True)
         section("참고 방식")
         add("방식", vbox(self.src_layer, self.src_image, self.src_psd), top=True)
@@ -446,7 +449,13 @@ class MainWindow(QMainWindow):
         self.ai_status.setWordWrap(True)
         self.provider.currentIndexChanged.connect(self.load_provider)
         self.api_key.editingFinished.connect(self.save_api_key)
+        self.ai_mode = QComboBox()
+        for text, mode in (("API로 바로 매칭", "api"), ("요청 폴더 만들기 (Claude Code·Codex에서 답하기)", "files"),
+                           ("끄기", "off")):
+            self.ai_mode.addItem(text, mode)
+        self.ai_mode.setCurrentIndex(max(0, self.ai_mode.findData(s.value("ai_mode", "api"))))
         section("AI 연결 (선택)")
+        add("AI 매칭", self.ai_mode)
         add("제공자", self.provider)
         add("모델", self.model)
         add("API 키", hbox(self.api_key, self.test_btn))
@@ -481,6 +490,7 @@ class MainWindow(QMainWindow):
         s.setValue("hint_path", self.hint_path.text())
         pid = self.provider.currentData()
         s.setValue("provider", pid)
+        s.setValue("ai_mode", self.ai_mode.currentData())
         s.setValue(f"model_{pid}", self.model.text())
         self.save_api_key()
 
@@ -492,6 +502,10 @@ class MainWindow(QMainWindow):
             hint_group=self.hint_group.text().strip() or "참고",
             hint_source=self.hint_source(),
             hint_path=self.hint_path.text().strip(),
+            ai_mode=self.ai_mode.currentData(),
+            ai_provider=self.provider.currentData(),
+            ai_model=self.model.text().strip() or ai.PROVIDERS[self.provider.currentData()]["model"],
+            ai_key=self.api_key.text().strip(),
             extra_boundary=patterns(self.boundary),
             background=patterns(self.background),
             hide_background=self.hide_bg.isChecked(),
@@ -613,6 +627,7 @@ class MainWindow(QMainWindow):
             item.setText(COL_INFO, "")
         self.results.clear()
         self.done_count = 0
+        self.waiting = 0
         self.total_bar.setRange(0, n * 100)
         self.total_bar.setValue(0)
         self.set_running(True)
@@ -628,6 +643,7 @@ class MainWindow(QMainWindow):
         self.worker.progressed.connect(self.on_progress)
         self.worker.finished_file.connect(self.on_finished)
         self.worker.failed_file.connect(self.on_failed)
+        self.worker.waiting_file.connect(self.on_waiting)
         self.worker.all_done.connect(self.on_all_done)
         self.worker.all_done.connect(self.thread.quit)
         self.thread.start()
@@ -664,6 +680,9 @@ class MainWindow(QMainWindow):
         item.setForeground(COL_INFO, QColor(style.MUTED))
         item.setToolTip(COL_INFO, self.describe(result))
         self.log.appendPlainText(f"    → {result.out_path.name} ({secs:.1f}초) {note}")
+        if result.ai_usage:
+            u = result.ai_usage
+            self.log.appendPlainText(f"    AI 매칭: {u['model']} · 입력 {u['input']:,} / 출력 {u['output']:,} 토큰")
         self.step()
         if self.files.currentItem() is item:
             self.show_selected(item)
@@ -677,6 +696,16 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText(f"    실패: {err}")
         self.step()
 
+    def on_waiting(self, row, msg):
+        item = self.files.topLevelItem(row)
+        self.set_status(item, "● 답 대기", style.WARN)
+        item.setText(COL_INFO, "AI 매칭 요청 폴더 생성")
+        item.setForeground(COL_INFO, QColor(style.MUTED))
+        item.setToolTip(COL_INFO, msg)
+        self.log.appendPlainText(f"    {msg}")
+        self.waiting += 1
+        self.step()
+
     def step(self):
         self.done_count += 1
         self.total_bar.setValue(self.done_count * 100)
@@ -687,7 +716,7 @@ class MainWindow(QMainWindow):
             item = self.files.topLevelItem(row)
             if item.text(COL_STATUS) == "대기":
                 self.set_status(item, "중지됨", style.WARN)
-        self.log.appendPlainText(f"── 끝: 완료 {ok}개, 실패 {self.done_count - ok}개")
+        self.log.appendPlainText(f"── 끝: 완료 {ok}개, 답 대기 {self.waiting}개, 실패 {self.done_count - ok - self.waiting}개")
         self.set_running(False)
         self.worker = None
 

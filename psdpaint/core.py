@@ -1,4 +1,5 @@
 """선화 PSD에 참고 레이어 힌트대로 밑색 레이어를 만든다."""
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -17,6 +18,10 @@ class Options:
     hint_group: str = "참고"            # 힌트 폴더(또는 레이어) 이름
     hint_source: str = "layer"          # 힌트 출처: layer(파일 안 참고 레이어) · image(레퍼런스 이미지) · psd(레퍼런스 PSD)
     hint_path: str = ""                 # image·psd 방식의 레퍼런스 파일 경로
+    ai_mode: str = "off"                # 다른 페이지 레퍼런스 처리: off(멈춤) · api(AI API에 묻기) · files(요청 폴더로 내보내기)
+    ai_provider: str = "claude"
+    ai_model: str = "claude-opus-5-5"
+    ai_key: str = ""                    # 실행할 때만 넘긴다. 설정 파일에 저장하지 않는다
     extra_boundary: list = field(default_factory=lambda: ["컷*", "*테두리*"])  # 경계로 쓸 픽셀 레이어 이름 패턴
     output_group: str = "밑색"
     gap_close_px: int = 2       # 선을 이만큼 두껍게 해서 작은 틈을 막는다
@@ -50,10 +55,24 @@ class Result:
     auto: int = 0               # 자동으로 칠한 영역 수
     merged: list = field(default_factory=list)  # '기타'로 합친 레이어
     preview: Image.Image = None  # 선화 + 밑색 축소 이미지
+    ai_usage: dict = field(default_factory=dict)  # AI 매칭을 썼다면 모델과 토큰 수
 
 
 class PaintError(Exception):
     pass
+
+
+class AwaitingAnswer(PaintError):
+    """AI 매칭 요청 폴더를 만들었고 답(answer.json)을 기다린다."""
+
+
+class LineMismatch(PaintError):
+    """레퍼런스가 다른 페이지다. AI 매칭에 넘길 레퍼런스 그림(RGB)과, 있으면 이름 붙은 밑색 레이어를 담는다."""
+
+    def __init__(self, msg, ref_rgb=None, layers=None):
+        super().__init__(msg)
+        self.ref_rgb = ref_rgb
+        self.layers = layers  # [(레이어 이름, RGBA 배열)] 또는 None
 
 
 def _disk(r):
@@ -113,7 +132,13 @@ def quantize(rgb, tol, min_share):
     return idx, colors
 
 
-def check_lines(rgba, boundary, what):
+def _flatten(rgba):
+    """투명한 곳을 흰색으로 채운 RGB."""
+    a = rgba[..., 3:4].astype(np.float32) / 255
+    return (rgba[..., :3] * a + 255 * (1 - a)).astype(np.uint8)
+
+
+def check_lines(rgba, boundary, what, ref_rgb=None, layers=None):
     """레퍼런스에 그려진 선이 원고 선화와 겹치는지 본다. 다른 페이지를 칠한 레퍼런스면 멈춘다."""
     dark = (rgba[..., 3] >= 250) & (rgba[..., :3].max(-1) < 80)
     # 진한 색 점·면(신발, 양말 힌트 등)은 빼고 가는 선만 본다
@@ -123,8 +148,9 @@ def check_lines(rgba, boundary, what):
     near = cv2.dilate(boundary.astype(np.uint8), _disk(3)) > 0
     ratio = (dark & near).sum() / dark.sum()
     if ratio < 0.4:
-        raise PaintError(f"{what}의 선이 이 원고의 선화와 맞지 않습니다 (겹침 {ratio:.0%}). "
-                         "다른 페이지를 칠한 레퍼런스로 보입니다. 같은 페이지를 칠한 레퍼런스를 쓰세요")
+        raise LineMismatch(f"{what}의 선이 이 원고의 선화와 맞지 않습니다 (겹침 {ratio:.0%}). "
+                           "다른 페이지를 칠한 레퍼런스로 보입니다",
+                           _flatten(rgba) if ref_rgb is None else ref_rgb, layers)
 
 
 def _folder_hints(group, src_psd, key_map, keys, boundary=None):
@@ -159,14 +185,6 @@ def _image_hints(rgba, opts, key_map):
     return keys
 
 
-def _check_size(w, h, psd, what):
-    if (w, h) == (psd.width, psd.height):
-        return
-    if abs(w / h - psd.width / psd.height) > 0.01:
-        raise PaintError(f"{what} 크기({w}×{h})가 원고({psd.width}×{psd.height})와 다릅니다. "
-                         "같은 페이지를 칠한 레퍼런스만 쓸 수 있습니다")
-
-
 def read_hints(psd, opts, psd_path=None, boundary=None):
     """참고 힌트 → (힌트 키 맵, 키별 (레이어 이름, RGB), 레이어 이름 순서(위→아래), 이미지 방식 여부).
 
@@ -183,8 +201,9 @@ def read_hints(psd, opts, psd_path=None, boundary=None):
     if opts.hint_source == "image":
         if not opts.hint_path or not Path(opts.hint_path).exists():
             raise PaintError("레퍼런스 이미지를 지정하세요")
-        im = Image.open(opts.hint_path)
-        _check_size(*im.size, psd, "레퍼런스 이미지")
+        im = Image.open(opts.hint_path).convert("RGBA")
+        if im.size != (psd.width, psd.height) and abs(im.width / im.height - psd.width / psd.height) > 0.01:
+            raise LineMismatch("레퍼런스 이미지 크기가 원고와 달라 다른 페이지로 보입니다", _flatten(np.asarray(im)))
         rgba = load_sidecar(opts.hint_path, psd)
         if boundary is not None:
             check_lines(rgba, boundary, "레퍼런스 이미지")
@@ -194,8 +213,22 @@ def read_hints(psd, opts, psd_path=None, boundary=None):
         if not opts.hint_path or not Path(opts.hint_path).exists():
             raise PaintError("레퍼런스 PSD를 지정하세요")
         ref = PSDImage.open(opts.hint_path)
-        _check_size(ref.width, ref.height, psd, "레퍼런스 PSD")
         group = psdio.find(ref, opts.output_group, True) or psdio.find(ref, opts.hint_group, True)
+        line = psdio.find(ref, opts.line_group, True)
+        same_size = (ref.width, ref.height) == (psd.width, psd.height)
+        lines_ok = line is not None  # 선화가 없는 PSD(캐릭터 시트 등)는 다른 페이지로 본다
+        if same_size and line is not None and boundary is not None:
+            la = psdio.group_alpha(line, ref)
+            lines = np.zeros(la.shape + (4,), np.uint8)
+            lines[..., 3] = np.where(la > 80, 255, 0)
+            try:
+                check_lines(lines, boundary, "레퍼런스 PSD")
+            except LineMismatch:
+                lines_ok = False
+        if not same_size or not lines_ok:
+            ref_rgb = np.asarray(ref.composite(force=True).convert("RGB")).copy()
+            layers = [(l.name, psdio.canvas_rgba(l, ref)) for l in group if not l.is_group()] if group else None
+            raise LineMismatch("레퍼런스 PSD가 이 원고와 다른 페이지로 보입니다", ref_rgb, layers)
         if group is not None:
             _folder_hints(group, ref, key_map, keys)
         else:
@@ -470,6 +503,45 @@ def make_preview(cls, boundary, keys, width=480):
     return im.resize((width, max(1, round(im.height * width / im.width))), Image.LANCZOS)
 
 
+def ai_match(mismatch, labels, n, boundary, frame, opts, out_path, say):
+    """다른 페이지 레퍼런스를 AI로 대응한다. → (영역별 키, 키 목록, 레이어 이름 순서, 토큰 사용량)"""
+    from . import match
+
+    areas = np.bincount(labels.ravel(), minlength=n + 1)
+    bg = find_background(labels, n, frame, np.full(n + 1, -1, np.int64), opts)
+    cand = np.nonzero((areas >= opts.small_area) & ~bg)[0]
+    cand = cand[cand > 0]
+    if mismatch.layers:
+        # 레퍼런스의 자동·기타 레이어 색은 부위를 뜻하지 않으므로 팔레트에서 뺀다
+        layers = [(nm, a) for nm, a in mismatch.layers if nm not in (opts.auto_layer, opts.other_layer)]
+        palette, masks = match.palette_from_layers(layers)
+    else:
+        rgba = np.dstack([mismatch.ref_rgb, np.full(mismatch.ref_rgb.shape[:2], 255, np.uint8)])
+        palette, masks = match.palette_from_image(rgba, quantize, opts.color_tol, opts.color_min_share)
+    if not palette:
+        raise PaintError("레퍼런스에서 밑색을 찾지 못했습니다")
+    job = match.make_job(labels, boundary, cand, mismatch.ref_rgb, palette, masks)
+
+    if opts.ai_mode == "files":
+        folder = Path(out_path).with_name(Path(out_path).stem + "_AI매칭")
+        answer_file = folder / "answer.json"
+        if not answer_file.exists():
+            match.save_job(job, folder)
+            raise AwaitingAnswer(f"AI 매칭 요청을 만들었습니다: {folder}. "
+                             "Claude Code·Codex에서 이 폴더의 README.md대로 answer.json을 만든 뒤 다시 실행하세요")
+        answer = json.loads(answer_file.read_text())
+    else:
+        if opts.ai_provider != "claude":
+            raise PaintError("AI 매칭은 지금 Claude만 지원합니다")
+        if not opts.ai_key:
+            raise PaintError("AI 매칭에 쓸 API 키가 없습니다. 설정의 AI 연결에 키를 넣으세요")
+        say(f"AI 매칭 중 (영역 {len(cand)}개)", 0.4)
+        answer = match.ask_claude(job, opts.ai_key, opts.ai_model)
+    region_key, keys = match.apply_answer(job, answer, n)
+    names = list(dict.fromkeys(name for name, _ in keys))
+    return region_key, keys, names, job.usage
+
+
 def paint(psd_path, out_path, opts=None, progress=None):
     """psd_path에 힌트대로 밑색을 넣어 out_path로 저장한다. progress(단계 설명, 0~1)를 부른다."""
     opts = opts or Options()
@@ -479,9 +551,16 @@ def paint(psd_path, out_path, opts=None, progress=None):
     say("선화 영역 나누는 중", 0.15)
     line_group, boundary, frame, labels, n = segment(psd, opts)
     say("참고 레이어 읽는 중", 0.3)
-    key_map, keys, names, image_mode = read_hints(psd, opts, psd_path, boundary)
-    say("영역에 힌트 대응하는 중", 0.4)
-    region_key = assign_hints(labels, n, key_map, opts, dense=image_mode or opts.hint_source == "psd")
+    ai_usage = {}
+    try:
+        key_map, keys, names, image_mode = read_hints(psd, opts, psd_path, boundary)
+        say("영역에 힌트 대응하는 중", 0.4)
+        region_key = assign_hints(labels, n, key_map, opts, dense=image_mode or opts.hint_source == "psd")
+    except LineMismatch as e:
+        if opts.ai_mode == "off":
+            raise PaintError(f"{e}. 다른 페이지 레퍼런스로 칠하려면 설정에서 AI 매칭을 켜세요") from None
+        region_key, keys, names, ai_usage = ai_match(e, labels, n, boundary, frame, opts, out_path, say)
+        image_mode = False
     if image_mode:
         # 칠한 예시 이미지는 배경도 흰색으로 칠해져 있다. 흰색 영역 중 배경으로 보이는 곳은 비운다
         white = np.array([min(rgb) >= 245 for _, rgb in keys] + [False])
@@ -495,6 +574,7 @@ def paint(psd_path, out_path, opts=None, progress=None):
         auto = auto_color(labels, n, region_key, bg, keys, opts)
         if auto:
             names.append(opts.auto_layer)
+    names[:] = list(dict.fromkeys(names))
     merge_small(labels, n, region_key, opts)
     areas = np.bincount(labels.ravel(), minlength=n + 1)
     unhinted_large = int(((region_key < 0) & (areas >= opts.small_area))[1:].sum())
@@ -507,4 +587,4 @@ def paint(psd_path, out_path, opts=None, progress=None):
     layers = write(psd, line_group, cls, keys, names, opts, out_path)
     preview = make_preview(cls, boundary, keys)
     say("완료", 1.0)
-    return Result(Path(out_path), layers, n, hinted, unhinted_large, auto, merged, preview)
+    return Result(Path(out_path), layers, n, hinted, unhinted_large, auto, merged, preview, ai_usage)

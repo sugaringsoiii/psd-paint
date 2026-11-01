@@ -1,0 +1,265 @@
+"""다른 페이지를 칠한 레퍼런스를 보고 원고의 영역마다 부위를 정한다 (AI 매칭).
+
+1. 원고에서 칠할 영역에 번호를 붙인 지도 이미지를 만든다.
+2. 레퍼런스에서 색(팔레트)을 뽑고 P1, P2 … 표시를 얹은 이미지를 만든다.
+3. 두 이미지를 AI에 보여 주고 영역 번호마다 팔레트를 고르게 한다.
+   - Claude API로 바로 묻거나,
+   - 같은 내용을 폴더로 내보내 Claude Code·Codex 같은 도구에서 답(answer.json)을 받아 다시 적용한다.
+"""
+import base64
+import io
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import cv2
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+from scipy import ndimage
+
+CHUNK_H = 1500       # 이미지 한 장의 최대 높이(px). 길게 이어진 웹툰 페이지는 나눠 보낸다
+REF_WIDTH = 900      # 레퍼런스 이미지 폭
+LABELS_PER_COLOR = 3  # 팔레트 색마다 표시를 얹을 덩어리 수
+
+PROMPT = """웹툰 밑색 작업이다. 이미지 두 묶음을 준다.
+
+[레퍼런스] 같은 작품의 다른 페이지를 칠해 둔 그림이다. 칠한 색마다 P1, P2 … 표시를 얹었다.
+[원고 지도] 지금 칠할 페이지의 선화다. 칠할 영역마다 옅은 색과 숫자를 얹었다.
+
+할 일: 원고 지도의 숫자 영역마다, 레퍼런스에서 같은 인물의 같은 부위에 쓰인 팔레트(P번호)를 고른다.
+- 머리모양·액세서리·옷차림으로 같은 인물을 알아본다. 같은 인물이면 페이지가 달라도 같은 색을 쓴다.
+- 피부(얼굴·목·손), 머리카락, 옷(재킷·셔츠·넥타이·치마·바지 등), 소품을 구분한다.
+- 레퍼런스에 없는 인물·사물이거나 판단이 서지 않으면 "none"을 고른다. 억지로 고르지 않는다.
+- 배경(하늘·벽·바닥 등)은 "none"이다.
+- 지도의 모든 숫자에 대해 하나씩 답한다.
+{palette_note}
+팔레트: {palette_list}
+영역 번호: 1 ~ {count}"""
+
+NAME_NOTE = """- layer_names에는 팔레트마다 밑색 레이어 이름을 짧은 한국어로 붙인다 (예: 머리, 피부, 재킷, 셔츠, 넥타이, 치마, 바지, 신발, 소품). 같은 부위면 인물이 달라도 같은 이름을 쓴다."""
+
+
+@dataclass
+class Job:
+    candidates: np.ndarray            # 지도 번호 k(1부터) → 원고 영역 번호
+    palette: list                     # [{"id": "P1", "rgb": (r, g, b), "name": str|None}]
+    ref_images: list                  # PIL 이미지
+    map_images: list                  # PIL 이미지
+    prompt: str
+    schema: dict
+    usage: dict = field(default_factory=dict)
+
+
+def _font(size):
+    for path in ("/System/Library/Fonts/Supplemental/Arial Bold.ttf", "C:/Windows/Fonts/arialbd.ttf",
+                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"):
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _chunks(h, rows_busy, max_h=CHUNK_H):
+    """세로로 긴 이미지를 max_h 이하로 나눌 위치. 내용이 적은 줄(컷 사이 여백)에서 자른다."""
+    cuts, y = [0], 0
+    while h - y > max_h:
+        lo, hi = y + max_h // 2, y + max_h
+        y = lo + int(np.argmin(rows_busy[lo:hi]))
+        cuts.append(y)
+    cuts.append(h)
+    return list(zip(cuts[:-1], cuts[1:]))
+
+
+def _pole(mask):
+    d = ndimage.distance_transform_edt(np.pad(mask, 1))[1:-1, 1:-1]
+    y, x = np.unravel_index(np.argmax(d), d.shape)
+    return int(x), int(y)
+
+
+def build_map(labels, boundary, cand_ids):
+    """원고 지도: 칠할 영역마다 옅은 색과 번호. → (이미지 목록, 지도 번호 → 영역 번호 배열)"""
+    h, w = labels.shape
+    lut = np.zeros(labels.max() + 1, np.int32)
+    lut[cand_ids] = np.arange(1, len(cand_ids) + 1)
+    kmap = lut[labels]
+    rng = np.random.default_rng(0)
+    tint = np.vstack([[255, 255, 255], rng.integers(175, 245, (len(cand_ids), 3))]).astype(np.uint8)
+    rgb = tint[kmap]
+    rgb[boundary] = 0
+    img = Image.fromarray(rgb)
+    draw = ImageDraw.Draw(img)
+    font = _font(max(20, w // 60))
+    depth = ndimage.distance_transform_edt(kmap > 0)
+    spots = ndimage.maximum_position(depth, kmap, index=np.arange(1, len(cand_ids) + 1))
+    for k, (y, x) in enumerate(spots, 1):
+        draw.text((x, y), str(k), fill=(210, 0, 0), font=font, anchor="mm", stroke_width=3, stroke_fill=(255, 255, 255))
+    busy = (kmap > 0).sum(1)
+    ys, _ = np.nonzero(kmap)
+    top, bottom = (int(ys.min()), int(ys.max()) + 1) if ys.size else (0, h)
+    # 칠할 영역이 없는 조각(컷 사이 여백)은 보내지 않는다
+    images = [img.crop((0, top + a, w, top + b)) for a, b in _chunks(bottom - top, busy[top:bottom])
+              if busy[top + a:top + b].any()]
+    return images, np.r_[0, cand_ids]
+
+
+def build_reference(ref_rgb, palette_masks, palette):
+    """레퍼런스 이미지에 팔레트 표시(P1 …)를 얹는다. 색마다 큰 덩어리 몇 개에 표시한다."""
+    h, w = ref_rgb.shape[:2]
+    scale = min(1.0, REF_WIDTH / w)
+    small = Image.fromarray(ref_rgb).resize((round(w * scale), round(h * scale)), Image.LANCZOS)
+    draw = ImageDraw.Draw(small)
+    font = _font(18)
+    for entry, mask in zip(palette, palette_masks):
+        m = cv2.resize(mask.astype(np.uint8), small.size, interpolation=cv2.INTER_NEAREST) > 0
+        lab, n = ndimage.label(m)
+        if not n:
+            continue
+        sizes = np.bincount(lab.ravel())[1:]
+        for i in np.argsort(-sizes)[:LABELS_PER_COLOR]:
+            if sizes[i] < 150:
+                break
+            x, y = _pole(lab == i + 1)
+            draw.text((x, y), entry["id"], fill=(220, 0, 0), font=font, anchor="mm", stroke_width=3,
+                      stroke_fill=(255, 255, 255))
+    arr = np.asarray(small.convert("L"))
+    content = np.nonzero((arr < 245).any(1))[0]
+    top, bottom = (int(content.min()), int(content.max()) + 1) if content.size else (0, small.height)
+    busy = (arr < 245).sum(1)
+    return [small.crop((0, top + a, small.width, top + b)) for a, b in _chunks(bottom - top, busy[top:bottom])
+            if busy[top + a:top + b].any()]
+
+
+def palette_from_layers(layers):
+    """레퍼런스 PSD의 밑색 레이어들 → 팔레트(이름 있음)와 색별 마스크. layers = [(이름, RGBA 배열)]"""
+    palette, masks = [], []
+    for name, rgba in layers:
+        solid = rgba[..., 3] >= 250
+        if not solid.any():
+            continue
+        packed = (rgba[..., 0].astype(np.int32) << 16) | (rgba[..., 1].astype(np.int32) << 8) | rgba[..., 2]
+        colors, counts = np.unique(packed[solid], return_counts=True)
+        for c, cnt in zip(colors, counts):
+            if cnt < 200:
+                continue
+            palette.append({"id": f"P{len(palette) + 1}", "rgb": ((c >> 16) & 255, (c >> 8) & 255, c & 255), "name": name})
+            masks.append(solid & (packed == c))
+    return palette, masks
+
+
+def palette_from_image(rgba, quantize, tol, min_share):
+    """칠한 예시 이미지 → 팔레트(이름 없음)와 색별 마스크. 선처럼 가는 색과 흰 배경은 뺀다."""
+    solid = rgba[..., 3] >= 250
+    idx, colors = quantize(rgba[..., :3][solid], tol, min_share)
+    full = np.full(solid.shape, -1, np.int32)
+    full[solid] = idx
+    palette, masks = [], []
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    for j, rgb in enumerate(colors):
+        m = full == j
+        if min(rgb) >= 248 and m.mean() > 0.3:  # 페이지 바탕
+            continue
+        body = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_OPEN, k) > 0
+        if body.sum() < 0.4 * m.sum():  # 대부분 가는 선
+            continue
+        palette.append({"id": f"P{len(palette) + 1}", "rgb": tuple(rgb), "name": None})
+        masks.append(body)
+    return palette, masks
+
+
+def make_job(labels, boundary, cand_ids, ref_rgb, palette, masks):
+    map_images, cands = build_map(labels, boundary, cand_ids)
+    ref_images = build_reference(ref_rgb, masks, palette)
+    ids = [p["id"] for p in palette]
+    named = all(p["name"] for p in palette)
+    palette_list = ", ".join(f"{p['id']}=#{p['rgb'][0]:02X}{p['rgb'][1]:02X}{p['rgb'][2]:02X}"
+                             + (f"({p['name']})" if p["name"] else "") for p in palette)
+    prompt = PROMPT.format(palette_note="" if named else NAME_NOTE, palette_list=palette_list, count=len(cand_ids))
+    props = {
+        "assignments": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"region": {"type": "integer"}, "palette": {"type": "string", "enum": ids + ["none"]}},
+            "required": ["region", "palette"], "additionalProperties": False}},
+    }
+    if not named:
+        props["layer_names"] = {"type": "array", "items": {
+            "type": "object",
+            "properties": {"palette": {"type": "string", "enum": ids}, "layer": {"type": "string"}},
+            "required": ["palette", "layer"], "additionalProperties": False}}
+    schema = {"type": "object", "properties": props, "required": list(props), "additionalProperties": False}
+    return Job(cands, palette, ref_images, map_images, prompt, schema)
+
+
+def _b64(img):
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, "PNG", optimize=True)
+    return base64.standard_b64encode(buf.getvalue()).decode()
+
+
+def ask_claude(job, api_key, model):
+    """Claude API로 영역마다 팔레트를 고른다. → 답 dict. 토큰 사용량은 job.usage에 남긴다."""
+    import anthropic
+
+    content = [{"type": "text", "text": "[레퍼런스]"}]
+    content += [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _b64(im)}}
+                for im in job.ref_images]
+    content.append({"type": "text", "text": "[원고 지도]"})
+    content += [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _b64(im)}}
+                for im in job.map_images]
+    content.append({"type": "text", "text": job.prompt})
+
+    client = anthropic.Anthropic(api_key=api_key, timeout=600)
+    # 안전 분류기가 요청을 거절하면 서버가 다른 모델로 이어서 처리하도록 기본 대체 설정을 켠다
+    resp = client.beta.messages.create(
+        model=model,
+        max_tokens=16000,
+        betas=["server-side-fallback-2026-07-01"],
+        fallbacks="default",
+        output_config={"format": {"type": "json_schema", "schema": job.schema}},
+        messages=[{"role": "user", "content": content}],
+    )
+    job.usage = {"input": resp.usage.input_tokens, "output": resp.usage.output_tokens, "model": resp.model}
+    if resp.stop_reason == "refusal":
+        raise RuntimeError("AI가 요청을 거절했습니다")
+    text = next(b.text for b in resp.content if b.type == "text")
+    return json.loads(text)
+
+
+def save_job(job, folder):
+    """Claude Code·Codex 같은 도구에서 답을 받을 수 있게 이미지와 지시문을 폴더로 내보낸다."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    names = []
+    for i, im in enumerate(job.ref_images, 1):
+        names.append(f"ref_{i}.png")
+        im.convert("RGB").save(folder / names[-1])
+    for i, im in enumerate(job.map_images, 1):
+        names.append(f"map_{i}.png")
+        im.convert("RGB").save(folder / names[-1])
+    (folder / "schema.json").write_text(json.dumps(job.schema, ensure_ascii=False, indent=2))
+    (folder / "README.md").write_text(
+        "# psd-paint AI 매칭 요청\n\n"
+        f"이미지: {', '.join(names)} (ref_* = 레퍼런스, map_* = 원고 지도)\n\n"
+        f"{job.prompt}\n\n"
+        "답은 schema.json 형식의 JSON으로 이 폴더의 answer.json에 저장한다.\n"
+        "저장한 뒤 psd-paint에서 같은 파일을 다시 실행하면 답을 적용한다.\n")
+    return folder
+
+
+def apply_answer(job, answer, n_regions):
+    """답 → (영역별 키 배열, 키 목록[(레이어 이름, RGB)]). 고르지 못한 영역은 -1."""
+    names = {p["id"]: p["name"] for p in job.palette}
+    for item in answer.get("layer_names", []):
+        if not names.get(item["palette"]):
+            names[item["palette"]] = item["layer"].strip() or None
+    keys, key_of = [], {}
+    for p in job.palette:
+        rgb = p["rgb"]
+        key_of[p["id"]] = len(keys)
+        keys.append((names.get(p["id"]) or f"색_{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}", rgb))
+    region_key = np.full(n_regions + 1, -1, np.int64)
+    for item in answer.get("assignments", []):
+        k, pid = item.get("region"), item.get("palette")
+        if pid in key_of and isinstance(k, int) and 1 <= k < len(job.candidates):
+            region_key[job.candidates[k]] = key_of[pid]
+    return region_key, keys
