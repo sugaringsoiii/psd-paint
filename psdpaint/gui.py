@@ -6,13 +6,14 @@ import time
 import traceback
 from pathlib import Path
 
+from PIL import Image
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QObject, QRectF, QSettings, Qt, QThread, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QCursor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout,
-    QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QTabWidget,
+    QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QTabWidget,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -20,7 +21,8 @@ import threading
 
 from . import ai, style
 from .cli import output_path
-from .core import AwaitingAnswer, Options, PaintError, paint
+from .core import (AwaitingAnswer, Options, PaintError, next_options, paint, quick_preview, region_at,
+                   repaint, set_region)
 
 APP_NAME = "psd-paint"
 COL_FILE, COL_STATUS, COL_INFO = range(3)
@@ -76,6 +78,7 @@ class Worker(QObject):
         self.stop = False
 
     def run(self):
+        opts = self.opts
         for row, src, dst in self.jobs:
             if self.stop:
                 break
@@ -83,9 +86,10 @@ class Worker(QObject):
             t = time.time()
             try:
                 Path(dst).parent.mkdir(parents=True, exist_ok=True)
-                result = paint(src, dst, self.opts,
+                result = paint(src, dst, opts,
                                progress=lambda msg, frac, row=row: self.progressed.emit(row, msg, frac))
                 self.finished_file.emit(row, result, time.time() - t)
+                opts = next_options(opts, result)  # 연속 모드: 이 결과를 다음 파일의 레퍼런스로
             except AwaitingAnswer as e:
                 self.waiting_file.emit(row, str(e))
             except PaintError as e:
@@ -165,8 +169,33 @@ class FileList(QTreeWidget):
         p.end()
 
 
+class PreviewLabel(QLabel):
+    """미리보기. 그림을 누르면 누른 위치를 그림 크기에 대한 비율(0~1)로 알려 준다."""
+    clicked = Signal(float, float)
+
+    def mousePressEvent(self, e):
+        pm = self.pixmap()
+        if pm is None or pm.isNull() or e.button() != Qt.LeftButton:
+            return
+        ox = (self.width() - pm.width()) / 2  # 가로 가운데 정렬
+        x, y = e.position().x() - ox, e.position().y()
+        if 0 <= x < pm.width() and 0 <= y < pm.height():
+            self.clicked.emit(x / pm.width(), y / pm.height())
+
+
+def swatch(rgb, size=14):
+    pm = QPixmap(size, size)
+    pm.fill(QColor(*rgb))
+    p = QPainter(pm)
+    p.setPen(QColor(style.BORDER_HI))
+    p.drawRect(0, 0, size - 1, size - 1)
+    p.end()
+    return QIcon(pm)
+
+
 class MainWindow(QMainWindow):
     ai_test_done = Signal(bool, str)
+    repaint_done = Signal(int, object, str)
     models_loaded = Signal(list, str)
 
     def __init__(self):
@@ -264,7 +293,8 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
 
         # 미리보기 탭
-        self.preview = QLabel("완료된 파일을 고르면\n미리보기가 나옵니다")
+        self.preview = PreviewLabel("완료된 파일을 고르면\n미리보기가 나옵니다")
+        self.preview.clicked.connect(self.on_preview_click)
         self.preview.setObjectName("empty")
         self.preview.setAlignment(Qt.AlignCenter)
         self.scroll = QScrollArea()
@@ -283,10 +313,29 @@ class MainWindow(QMainWindow):
         open_row = QHBoxLayout()
         open_row.addWidget(self.open_btn)
         open_row.addWidget(self.reveal_btn)
+        # 클릭 수정: 미리보기에서 조각을 눌러 레이어·색을 바꾸고 다시 저장한다
+        self.edit_info = label("조각을 누르면 레이어·색을 바꿀 수 있어요", "summary")
+        self.undo_btn = QPushButton("되돌리기")
+        self.undo_btn.setObjectName("ghost")
+        self.undo_btn.clicked.connect(self.undo_edit)
+        self.save_edit_btn = QPushButton("수정 저장")
+        self.save_edit_btn.setObjectName("primary")
+        self.save_edit_btn.clicked.connect(self.save_edits)
+        edit_row = QHBoxLayout()
+        edit_row.setContentsMargins(0, 0, 0, 0)
+        edit_row.addWidget(self.edit_info, 1)
+        edit_row.addWidget(self.undo_btn)
+        edit_row.addWidget(self.save_edit_btn)
+        self.edit_bar = QWidget()
+        self.edit_bar.setLayout(edit_row)
+        self.edits = {}  # 행 번호 → [(영역, 바꾸기 전 키)]
+        self.repaint_done.connect(self.on_repaint_done)
+
         pv = QWidget()
         pl = QVBoxLayout(pv)
         pl.setContentsMargins(0, 8, 0, 0)
         pl.addWidget(self.scroll, 1)
+        pl.addWidget(self.edit_bar)
         pl.addWidget(self.preview_info)
         pl.addLayout(open_row)
         tabs.addTab(pv, "미리보기")
@@ -793,12 +842,14 @@ class MainWindow(QMainWindow):
             self.preview.setAlignment(Qt.AlignCenter)
             self.preview.setText("완료된 파일을 고르면\n미리보기가 나옵니다")
             self.preview_info.setText("")
+            self.update_edit_bar()
             return
         self._qimage = ImageQt(result.preview.convert("RGB"))  # QImage가 쓰는 동안 버퍼를 살려 둔다
         self.preview_pix = QPixmap.fromImage(self._qimage)
         self.preview.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.preview_info.setText(self.describe(result))
         self.fit_preview()
+        self.update_edit_bar()
 
     def fit_preview(self):
         if self.preview_pix is None:
@@ -809,6 +860,123 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self.fit_preview()
+
+    # ---- 클릭 수정 ----
+    def current_row(self):
+        item = self.files.currentItem()
+        return self.files.indexOfTopLevelItem(item) if item else -1
+
+    def update_edit_bar(self):
+        row = self.current_row()
+        result = self.results.get(row)
+        has_state = bool(result and result.state)
+        self.edit_bar.setVisible(has_state)
+        n = len(self.edits.get(row, []))
+        self.edit_info.setText(f"수정 {n}곳 · 저장하면 PSD에 반영돼요" if n else "조각을 누르면 레이어·색을 바꿀 수 있어요")
+        self.undo_btn.setEnabled(n > 0)
+        self.save_edit_btn.setEnabled(n > 0)
+        self.preview.setCursor(Qt.PointingHandCursor if has_state else Qt.ArrowCursor)
+
+    def set_preview_image(self, im):
+        self._qimage = ImageQt(im.convert("RGB"))  # QImage가 쓰는 동안 버퍼를 살려 둔다
+        self.preview_pix = QPixmap.fromImage(self._qimage)
+        self.fit_preview()
+
+    def edit_menu(self, st, region):
+        """누른 조각에 쓸 레이어·색 메뉴. → 고른 (레이어, RGB), 비우기면 (None, None), 취소면 False"""
+        cur = st["region_key"][region]
+        menu = QMenu(self)
+        head = menu.addAction(f"지금: {st['keys'][cur][0] if cur >= 0 else '칠하지 않음'}")
+        head.setEnabled(False)
+        menu.addSeparator()
+        seen = set()
+        for name, rgb in st["keys"]:
+            rgb = tuple(int(v) for v in rgb)
+            if (name, rgb) in seen:
+                continue
+            seen.add((name, rgb))
+            act = menu.addAction(swatch(rgb), f"{name}  #{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}")
+            act.setData([name, list(rgb)])
+        menu.addSeparator()
+        menu.addAction("칠하지 않음 (비우기)").setData("clear")
+        menu.addAction("새 레이어…").setData("new")
+        chosen = menu.exec(QCursor.pos())
+        data = chosen.data() if chosen else None
+        if data is None:
+            return False
+        if data == "clear":
+            return None, None
+        if data == "new":
+            name, ok = QInputDialog.getText(self, "새 레이어", "레이어 이름:")
+            if not ok or not name.strip():
+                return False
+            gray, ok = QInputDialog.getInt(self, "새 레이어", "회색 값 (0 검정 ~ 255 흰색):", 180, 0, 255)
+            return (name.strip(), (gray, gray, gray)) if ok else False
+        return data[0], tuple(data[1])
+
+    def on_preview_click(self, fx, fy):
+        row = self.current_row()
+        result = self.results.get(row)
+        if not result or not result.state:
+            return
+        st = result.state
+        h, w = st["labels"].shape
+        region = region_at(st, fx * w, fy * h)
+        if not region:
+            return
+        # 누른 조각을 빨갛게 표시하고 메뉴를 띄운다
+        base = result.preview.convert("RGB")
+        mask = Image.fromarray(((st["labels"] == region) * 255).astype("uint8")).resize(base.size, Image.NEAREST)
+        self.set_preview_image(Image.composite(Image.new("RGB", base.size, (235, 70, 70)), base,
+                                               mask.point(lambda v: 150 if v else 0)))
+        picked = self.edit_menu(st, region)
+        if picked is False:
+            self.set_preview_image(result.preview)
+            return
+        self.edits.setdefault(row, []).append((region, int(st["region_key"][region])))
+        set_region(st, region, *picked)
+        result.preview = quick_preview(st)
+        self.set_preview_image(result.preview)
+        self.update_edit_bar()
+
+    def undo_edit(self):
+        row = self.current_row()
+        result = self.results.get(row)
+        if not result or not self.edits.get(row):
+            return
+        region, prev = self.edits[row].pop()
+        result.state["region_key"][region] = prev
+        result.preview = quick_preview(result.state)
+        self.set_preview_image(result.preview)
+        self.update_edit_bar()
+
+    def save_edits(self):
+        row = self.current_row()
+        result = self.results.get(row)
+        if not result or not self.edits.get(row):
+            return
+        self.save_edit_btn.setEnabled(False)
+        self.edit_info.setText("저장하는 중…")
+        state = result.state
+
+        def run():
+            try:
+                self.repaint_done.emit(row, repaint(state), "")
+            except Exception as e:  # 저장 실패를 화면에 알린다
+                self.repaint_done.emit(row, None, str(e) or type(e).__name__)
+        threading.Thread(target=run, daemon=True).start()
+
+    def on_repaint_done(self, row, new_result, err):
+        if err:
+            self.log.appendPlainText(f"    수정 저장 실패: {err}")
+            self.update_edit_bar()
+            return
+        n = len(self.edits.get(row, []))
+        self.results[row] = new_result
+        self.edits[row] = []
+        self.log.appendPlainText(f"    수정 {n}곳 저장 → {new_result.out_path.name}")
+        if self.current_row() == row:
+            self.show_selected(self.files.topLevelItem(row))
 
     def open_result(self, reveal):
         item = self.files.currentItem()

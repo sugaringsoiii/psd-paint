@@ -59,6 +59,7 @@ class Result:
     merged: list = field(default_factory=list)  # '기타'로 합친 레이어
     preview: Image.Image = None  # 선화 + 밑색 축소 이미지
     ai_usage: dict = field(default_factory=dict)  # AI 매칭을 썼다면 모델과 토큰 수
+    state: dict = field(default_factory=dict, repr=False)  # 클릭 수정·다시 저장에 쓰는 칠하기 상태
 
 
 class PaintError(Exception):
@@ -516,7 +517,7 @@ def ai_match(mismatch, labels, n, boundary, frame, opts, out_path, say):
     cand = cand[cand > 0]
     if mismatch.layers:
         # 레퍼런스의 자동·기타 레이어 색은 부위를 뜻하지 않으므로 팔레트에서 뺀다
-        layers = [(nm, a) for nm, a in mismatch.layers if nm not in (opts.auto_layer, opts.other_layer)]
+        layers = [(nm, a) for nm, a in mismatch.layers if nm not in (opts.auto_layer, opts.other_layer, "사물")]
         palette, masks = match.palette_from_layers(layers)
     else:
         rgba = np.dstack([mismatch.ref_rgb, np.full(mismatch.ref_rgb.shape[:2], 255, np.uint8)])
@@ -610,6 +611,8 @@ def paint(psd_path, out_path, opts=None, progress=None):
     unhinted_large = int(((region_key < 0) & (areas >= opts.small_area))[1:].sum())
     if not (region_key >= 0).any():
         raise PaintError("칠할 영역이 없습니다 (참고 힌트도 자동 칠하기도 없음)")
+    state = {"psd_path": str(psd_path), "out_path": str(out_path), "opts": opts, "labels": labels,
+             "boundary": boundary, "region_key": region_key.copy(), "keys": list(keys), "names": list(names)}
     say("밑색 채우는 중", 0.6)
     cls = fill(labels, boundary, region_key, keys, opts)
     merged = cap_layers(cls, keys, names, opts)
@@ -617,4 +620,73 @@ def paint(psd_path, out_path, opts=None, progress=None):
     layers = write(psd, line_group, cls, keys, names, opts, out_path)
     preview = make_preview(cls, boundary, keys)
     say("완료", 1.0)
-    return Result(Path(out_path), layers, n, hinted, unhinted_large, auto, merged, preview, ai_usage)
+    return Result(Path(out_path), layers, n, hinted, unhinted_large, auto, merged, preview, ai_usage, state)
+
+
+def next_options(opts, result):
+    """연속 모드: 레퍼런스(이미지·PSD)로 칠한 파일의 결과를 다음 파일의 레퍼런스로 쓴다.
+
+    웹툰은 같은 장면이 여러 페이지 이어지므로, 다른 회차 레퍼런스보다 직전 페이지 결과가 옷·인물을 맞추기 쉽다.
+    파일 안 참고 레이어 방식이면 파일마다 힌트가 따로 있으므로 그대로 둔다.
+    """
+    from dataclasses import replace
+
+    if opts.hint_source not in ("image", "psd") or opts.ai_mode == "off" or result is None:
+        return opts
+    return replace(opts, hint_source="psd", hint_path=str(result.out_path))
+
+
+def quick_preview(state, width=480):
+    """선 아래 넓히기 없이 영역 색만 칠한 미리보기 (클릭 수정 중 바로 보여 줄 때). 선이 틈을 가린다."""
+    lut = np.array([(255, 255, 255)] + [rgb for _, rgb in state["keys"]], np.uint8)
+    rgb = lut[(state["region_key"] + 1)[state["labels"]]]
+    rgb[state["boundary"]] = 0
+    im = Image.fromarray(rgb)
+    return im.resize((width, max(1, round(im.height * width / im.width))), Image.LANCZOS)
+
+
+def region_at(state, x, y, search=8):
+    """캔버스 좌표의 영역 번호. 선 위를 누르면 search px 안의 가장 가까운 영역. 없으면 0."""
+    labels = state["labels"]
+    h, w = labels.shape
+    x, y = int(np.clip(x, 0, w - 1)), int(np.clip(y, 0, h - 1))
+    if labels[y, x]:
+        return int(labels[y, x])
+    y0, y1, x0, x1 = max(0, y - search), min(h, y + search + 1), max(0, x - search), min(w, x + search + 1)
+    ys, xs = np.nonzero(labels[y0:y1, x0:x1])
+    if not ys.size:
+        return 0
+    i = np.argmin((ys + y0 - y) ** 2 + (xs + x0 - x) ** 2)
+    return int(labels[ys[i] + y0, xs[i] + x0])
+
+
+def set_region(state, region, layer, rgb):
+    """영역 하나를 (레이어, 색)으로 바꾼다. layer가 None이면 비운다."""
+    if layer is None:
+        state["region_key"][region] = -1
+        return
+    key = (layer, tuple(int(v) for v in rgb))
+    if key not in state["keys"]:
+        state["keys"].append(key)
+        if layer not in state["names"]:
+            state["names"].insert(0, layer)
+    state["region_key"][region] = state["keys"].index(key)
+
+
+def repaint(state, progress=None):
+    """클릭 수정한 상태로 밑색을 다시 채워 PSD를 다시 저장한다. AI는 부르지 않는다."""
+    say = progress or (lambda msg, frac: None)
+    opts = state["opts"]
+    say("PSD 여는 중", 0.1)
+    psd = PSDImage.open(state["psd_path"])
+    line_group = psdio.find(psd, opts.line_group, True)
+    keys, names = list(state["keys"]), list(state["names"])
+    say("밑색 채우는 중", 0.4)
+    cls = fill(state["labels"], state["boundary"], state["region_key"].copy(), keys, opts)
+    merged = cap_layers(cls, keys, names, opts)
+    say("PSD 저장 중", 0.8)
+    layers = write(psd, line_group, cls, keys, names, opts, state["out_path"])
+    preview = make_preview(cls, state["boundary"], keys)
+    say("완료", 1.0)
+    n = int(state["labels"].max())
+    return Result(Path(state["out_path"]), layers, n, 0, 0, 0, merged, preview, {}, state)
