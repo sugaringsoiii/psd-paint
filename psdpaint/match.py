@@ -20,7 +20,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from scipy import ndimage
 
-CHUNK_H = 1500       # 이미지 한 장의 최대 높이(px). 길게 이어진 웹툰 페이지는 나눠 보낸다
+CHUNK_H = 1000       # 이미지 한 장의 최대 높이(px). 길게 이어진 웹툰 페이지는 나눠 보낸다
+MARGIN = 30          # 조각을 내용에 맞춰 자를 때 남기는 여백
 REF_WIDTH = 900      # 레퍼런스 이미지 폭
 LABELS_PER_COLOR = 3  # 팔레트 색마다 표시를 얹을 덩어리 수
 
@@ -92,7 +93,7 @@ def build_map(labels, boundary, cand_ids):
     rgb[boundary] = 0
     img = Image.fromarray(rgb)
     draw = ImageDraw.Draw(img)
-    font = _font(max(20, w // 60))
+    font = _font(26)
     depth = ndimage.distance_transform_edt(kmap > 0)
     spots = ndimage.maximum_position(depth, kmap, index=np.arange(1, len(cand_ids) + 1))
     for k, (y, x) in enumerate(spots, 1):
@@ -100,9 +101,15 @@ def build_map(labels, boundary, cand_ids):
     busy = (kmap > 0).sum(1)
     ys, _ = np.nonzero(kmap)
     top, bottom = (int(ys.min()), int(ys.max()) + 1) if ys.size else (0, h)
-    # 칠할 영역이 없는 조각(컷 사이 여백)은 보내지 않는다
-    images = [img.crop((0, top + a, w, top + b)) for a, b in _chunks(bottom - top, busy[top:bottom])
-              if busy[top + a:top + b].any()]
+    # 칠할 영역이 없는 조각(컷 사이 여백)은 보내지 않고, 조각마다 내용 폭에 맞춰 잘라 글씨를 크게 보이게 한다
+    images = []
+    for a, b in _chunks(bottom - top, busy[top:bottom]):
+        y0, y1 = top + a, top + b
+        cols = np.nonzero((kmap[y0:y1] > 0).any(0))[0]
+        if not cols.size:
+            continue
+        x0, x1 = max(0, int(cols.min()) - MARGIN), min(w, int(cols.max()) + 1 + MARGIN)
+        images.append(img.crop((x0, y0, x1, y1)))
     return images, np.r_[0, cand_ids]
 
 
@@ -158,15 +165,21 @@ def palette_from_image(rgba, quantize, tol, min_share):
     full[solid] = idx
     palette, masks = [], []
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    has_white = False
     for j, rgb in enumerate(colors):
         m = full == j
-        if min(rgb) >= 248 and m.mean() > 0.3:  # 페이지 바탕
+        if min(rgb) >= 248 and m.mean() > 0.3:  # 페이지 바탕. 피부·흰 옷도 같은 흰색이라 아래에서 따로 넣는다
+            has_white = True
             continue
         body = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_OPEN, k) > 0
         if body.sum() < 0.4 * m.sum():  # 대부분 가는 선
             continue
         palette.append({"id": f"P{len(palette) + 1}", "rgb": tuple(rgb), "name": None})
         masks.append(body)
+    if has_white:
+        palette.append({"id": f"P{len(palette) + 1}", "rgb": (255, 255, 255), "name": None,
+                        "note": "흰색: 피부·흰 셔츠 등 칠하지 않은 듯 하얀 부위"})
+        masks.append(np.zeros(solid.shape, bool))  # 바탕과 구분되지 않으므로 그림에는 표시하지 않는다
     return palette, masks
 
 
@@ -176,7 +189,8 @@ def make_job(labels, boundary, cand_ids, ref_rgb, palette, masks):
     ids = [p["id"] for p in palette]
     named = all(p["name"] for p in palette)
     palette_list = ", ".join(f"{p['id']}=#{p['rgb'][0]:02X}{p['rgb'][1]:02X}{p['rgb'][2]:02X}"
-                             + (f"({p['name']})" if p["name"] else "") for p in palette)
+                             + (f"({p['name'] or p.get('note')})" if p["name"] or p.get("note") else "")
+                             for p in palette)
     prompt = PROMPT.format(palette_note="" if named else NAME_NOTE, palette_list=palette_list, count=len(cand_ids))
     props = {
         "assignments": {"type": "array", "items": {
@@ -270,7 +284,9 @@ def ask_gemini(job, api_key, model):
     headers = {"x-goog-api-key": api_key}
     body = {"contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"responseMimeType": "application/json",
-                                 "responseJsonSchema": _strip_schema(job.schema)}}
+                                 "responseJsonSchema": _strip_schema(job.schema),
+                                 # 기본 해상도로는 이미지를 작게 줄여 봐서 지도 번호를 읽지 못한다
+                                 "mediaResolution": "MEDIA_RESOLUTION_HIGH"}}
     try:
         data = _post(url, headers, body)
     except RuntimeError as e:
@@ -278,7 +294,8 @@ def ask_gemini(job, api_key, model):
             raise
         # responseJsonSchema를 모르는 모델이면 예전 형식(responseSchema)으로 다시 묻는다
         body["generationConfig"] = {"responseMimeType": "application/json",
-                                    "responseSchema": _openapi_schema(job.schema)}
+                                    "responseSchema": _openapi_schema(job.schema),
+                                    "mediaResolution": "MEDIA_RESOLUTION_HIGH"}
         data = _post(url, headers, body)
     cand = (data.get("candidates") or [{}])[0]
     text = "".join(p.get("text", "") for p in cand.get("content", {}).get("parts", []))
