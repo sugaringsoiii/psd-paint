@@ -12,7 +12,7 @@ from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout,
     QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QRadioButton, QScrollArea, QSpinBox, QTabWidget,
+    QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QTabWidget,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -167,6 +167,7 @@ class FileList(QTreeWidget):
 
 class MainWindow(QMainWindow):
     ai_test_done = Signal(bool, str)
+    models_loaded = Signal(list, str)
 
     def __init__(self):
         super().__init__()
@@ -439,7 +440,12 @@ class MainWindow(QMainWindow):
         for pid, info in ai.PROVIDERS.items():
             self.provider.addItem(info["label"], pid)
         self.provider.setCurrentIndex(max(0, self.provider.findData(s.value("provider", "claude"))))
-        self.model = QLineEdit()
+        self.model = QComboBox()
+        self.model.setEditable(True)
+        self.model.setInsertPolicy(QComboBox.NoInsert)
+        self.list_btn = QPushButton("목록 불러오기")
+        self.list_btn.setToolTip("API 키로 쓸 수 있는 모델 이름을 받아 옵니다")
+        self.list_btn.clicked.connect(self.fetch_models)
         self.api_key = QLineEdit()
         self.api_key.setEchoMode(QLineEdit.Password)
         self.api_key.setPlaceholderText("API 키 (OS 키체인에 저장)")
@@ -455,12 +461,18 @@ class MainWindow(QMainWindow):
             self.ai_mode.addItem(text, mode)
         self.ai_mode.setCurrentIndex(max(0, self.ai_mode.findData(s.value("ai_mode", "api"))))
         section("AI 연결 (선택)")
+        # 긴 항목 때문에 설정 탭이 넓어지지 않게 콤보박스는 내용 폭에 맞추지 않는다
+        for combo in (self.ai_mode, self.provider, self.model):
+            combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(8)
+            combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         add("AI 매칭", self.ai_mode)
         add("제공자", self.provider)
-        add("모델", self.model)
+        add("모델", hbox(self.model, self.list_btn))
         add("API 키", hbox(self.api_key, self.test_btn))
         add("", self.ai_status)
         self.ai_test_done.connect(self.on_ai_test)
+        self.models_loaded.connect(self.on_models_loaded)
         self.load_provider()
         grid.setRowStretch(row, 1)
 
@@ -491,7 +503,7 @@ class MainWindow(QMainWindow):
         pid = self.provider.currentData()
         s.setValue("provider", pid)
         s.setValue("ai_mode", self.ai_mode.currentData())
-        s.setValue(f"model_{pid}", self.model.text())
+        s.setValue(f"model_{pid}", self.model.currentText())
         self.save_api_key()
 
     def options(self):
@@ -504,7 +516,7 @@ class MainWindow(QMainWindow):
             hint_path=self.hint_path.text().strip(),
             ai_mode=self.ai_mode.currentData(),
             ai_provider=self.provider.currentData(),
-            ai_model=self.model.text().strip() or ai.PROVIDERS[self.provider.currentData()]["model"],
+            ai_model=self.model.currentText().strip() or ai.PROVIDERS[self.provider.currentData()]["model"],
             ai_key=self.api_key.text().strip(),
             extra_boundary=patterns(self.boundary),
             background=patterns(self.background),
@@ -532,8 +544,11 @@ class MainWindow(QMainWindow):
     # ---- AI 연결 ----
     def load_provider(self):
         pid = self.provider.currentData()
-        self.model.setText(self.settings.value(f"model_{pid}", ai.PROVIDERS[pid]["model"]))
-        self.model.setPlaceholderText("모델 이름")
+        info = ai.PROVIDERS[pid]
+        self.model.clear()
+        self.model.addItems(info["models"])
+        self.model.setCurrentText(self.settings.value(f"model_{pid}", info["model"]))
+        self.model.lineEdit().setPlaceholderText("모델 이름")
         self.api_key.setText(ai.get_key(pid))
         self.ai_status.setText("")
         self._loaded_provider = pid
@@ -551,8 +566,36 @@ class MainWindow(QMainWindow):
         self.test_btn.setEnabled(False)
         self.ai_status.setObjectName("summary")
         self.ai_status.setText("확인 중…")
-        args = (self.provider.currentData(), self.api_key.text().strip(), self.model.text().strip())
+        args = (self.provider.currentData(), self.api_key.text().strip(), self.model.currentText().strip())
         threading.Thread(target=lambda: self.ai_test_done.emit(*ai.test_connection(*args)), daemon=True).start()
+
+    def fetch_models(self):
+        pid, key = self.provider.currentData(), self.api_key.text().strip()
+        if not key:
+            self.on_ai_test(False, "API 키를 먼저 입력하세요")
+            return
+        self.save_api_key()
+        self.list_btn.setEnabled(False)
+        self.ai_status.setText("모델 목록을 받는 중…")
+
+        def run():
+            try:
+                names = ai.list_models(pid, key)
+                self.models_loaded.emit(names, "")
+            except Exception as e:  # 네트워크·인증 오류를 화면에 보여 준다
+                self.models_loaded.emit([], str(e) or type(e).__name__)
+        threading.Thread(target=run, daemon=True).start()
+
+    def on_models_loaded(self, names, err):
+        self.list_btn.setEnabled(True)
+        if err or not names:
+            self.on_ai_test(False, f"모델 목록을 받지 못했습니다{': ' + err if err else ''}")
+            return
+        current = self.model.currentText()
+        self.model.clear()
+        self.model.addItems(names)
+        self.model.setCurrentText(current if current in names else names[0])
+        self.on_ai_test(True, f"모델 {len(names)}개를 불러왔습니다")
 
     def on_ai_test(self, ok, msg):
         self.test_btn.setEnabled(True)

@@ -9,6 +9,9 @@
 import base64
 import io
 import json
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -223,6 +226,94 @@ def ask_claude(job, api_key, model):
         raise RuntimeError("AI가 요청을 거절했습니다")
     text = next(b.text for b in resp.content if b.type == "text")
     return json.loads(text)
+
+
+def _post(url, headers, body, timeout=600):
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={**headers, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:500]
+        raise RuntimeError(f"AI 요청 실패 ({e.code}): {detail}") from None
+
+
+def _strip_schema(node):
+    """Gemini가 받지 않는 additionalProperties를 뺀 스키마."""
+    if isinstance(node, dict):
+        return {k: _strip_schema(v) for k, v in node.items() if k != "additionalProperties"}
+    if isinstance(node, list):
+        return [_strip_schema(v) for v in node]
+    return node
+
+
+def _openapi_schema(node):
+    """Gemini responseSchema(OpenAPI 형식): type을 대문자로 쓴다."""
+    if isinstance(node, dict):
+        return {k: (v.upper() if k == "type" else _openapi_schema(v)) for k, v in node.items()
+                if k != "additionalProperties"}
+    if isinstance(node, list):
+        return [_openapi_schema(v) for v in node]
+    return node
+
+
+def ask_gemini(job, api_key, model):
+    """Gemini API로 영역마다 팔레트를 고른다."""
+    parts = [{"text": "[레퍼런스]"}]
+    parts += [{"inline_data": {"mime_type": "image/png", "data": _b64(im)}} for im in job.ref_images]
+    parts.append({"text": "[원고 지도]"})
+    parts += [{"inline_data": {"mime_type": "image/png", "data": _b64(im)}} for im in job.map_images]
+    parts.append({"text": job.prompt})
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(model)}:generateContent"
+    headers = {"x-goog-api-key": api_key}
+    body = {"contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {"responseMimeType": "application/json",
+                                 "responseJsonSchema": _strip_schema(job.schema)}}
+    try:
+        data = _post(url, headers, body)
+    except RuntimeError as e:
+        if "responseJsonSchema" not in str(e):
+            raise
+        # responseJsonSchema를 모르는 모델이면 예전 형식(responseSchema)으로 다시 묻는다
+        body["generationConfig"] = {"responseMimeType": "application/json",
+                                    "responseSchema": _openapi_schema(job.schema)}
+        data = _post(url, headers, body)
+    cand = (data.get("candidates") or [{}])[0]
+    text = "".join(p.get("text", "") for p in cand.get("content", {}).get("parts", []))
+    if not text:
+        raise RuntimeError(f"AI가 답하지 않았습니다 (finishReason: {cand.get('finishReason')})")
+    meta = data.get("usageMetadata", {})
+    job.usage = {"input": meta.get("promptTokenCount", 0), "output": meta.get("candidatesTokenCount", 0), "model": model}
+    return json.loads(text)
+
+
+def ask_openai(job, api_key, model):
+    """OpenAI Responses API로 영역마다 팔레트를 고른다."""
+    content = [{"type": "input_text", "text": "[레퍼런스]"}]
+    content += [{"type": "input_image", "image_url": f"data:image/png;base64,{_b64(im)}"} for im in job.ref_images]
+    content.append({"type": "input_text", "text": "[원고 지도]"})
+    content += [{"type": "input_image", "image_url": f"data:image/png;base64,{_b64(im)}"} for im in job.map_images]
+    content.append({"type": "input_text", "text": job.prompt})
+    body = {"model": model, "input": [{"role": "user", "content": content}],
+            "text": {"format": {"type": "json_schema", "name": "region_palette", "schema": job.schema, "strict": True}}}
+    data = _post("https://api.openai.com/v1/responses", {"Authorization": f"Bearer {api_key}"}, body)
+    text = "".join(c.get("text", "") for item in data.get("output", []) if item.get("type") == "message"
+                   for c in item.get("content", []) if c.get("type") == "output_text")
+    if not text:
+        raise RuntimeError("AI가 답하지 않았습니다")
+    usage = data.get("usage", {})
+    job.usage = {"input": usage.get("input_tokens", 0), "output": usage.get("output_tokens", 0), "model": model}
+    return json.loads(text)
+
+
+def ask(job, provider, api_key, model):
+    if provider == "claude":
+        return ask_claude(job, api_key, model)
+    if provider == "gemini":
+        return ask_gemini(job, api_key, model)
+    if provider == "openai":
+        return ask_openai(job, api_key, model)
+    raise RuntimeError(f"알 수 없는 AI 제공자: {provider}")
 
 
 def save_job(job, folder):

@@ -531,12 +531,13 @@ def ai_match(mismatch, labels, n, boundary, frame, opts, out_path, say):
                              "Claude Code·Codex에서 이 폴더의 README.md대로 answer.json을 만든 뒤 다시 실행하세요")
         answer = json.loads(answer_file.read_text())
     else:
-        if opts.ai_provider != "claude":
-            raise PaintError("AI 매칭은 지금 Claude만 지원합니다")
         if not opts.ai_key:
             raise PaintError("AI 매칭에 쓸 API 키가 없습니다. 설정의 AI 연결에 키를 넣으세요")
         say(f"AI 매칭 중 (영역 {len(cand)}개)", 0.4)
-        answer = match.ask_claude(job, opts.ai_key, opts.ai_model)
+        try:
+            answer = match.ask(job, opts.ai_provider, opts.ai_key, opts.ai_model)
+        except (RuntimeError, ValueError) as e:
+            raise PaintError(f"AI 매칭 실패: {e}") from None
     region_key, keys = match.apply_answer(job, answer, n)
     names = list(dict.fromkeys(name for name, _ in keys))
     return region_key, keys, names, job.usage

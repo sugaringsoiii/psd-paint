@@ -11,10 +11,12 @@ import keyring
 
 SERVICE = "psd-paint"
 PROVIDERS = {
-    "claude": {"label": "Claude (Anthropic)", "model": "claude-opus-5-5"},
-    "openai": {"label": "OpenAI (Codex)", "model": ""},
-    "gemini": {"label": "Google Gemini", "model": ""},
+    "claude": {"label": "Claude (Anthropic)", "model": "claude-opus-5-5",
+               "models": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]},
+    "openai": {"label": "OpenAI (Codex)", "model": "gpt-5", "models": ["gpt-5", "gpt-5-mini"]},
+    "gemini": {"label": "Google Gemini", "model": "gemini-2.5-pro", "models": ["gemini-2.5-pro", "gemini-2.5-flash"]},
 }
+# OpenAI·Gemini 기본 목록은 예시다. 실제로 쓸 수 있는 모델은 [목록 불러오기]로 키에서 받아 온다.
 
 
 def get_key(provider):
@@ -81,3 +83,23 @@ def test_connection(provider, key, model=""):
         return False, f"오류 {e.code}"
     except urllib.error.URLError:
         return False, "네트워크에 연결할 수 없습니다"
+
+
+def list_models(provider, key):
+    """키로 쓸 수 있는 모델 이름 목록 (이미지 입력이 되는 생성 모델 위주)."""
+    if provider == "claude":
+        import anthropic
+        client = anthropic.Anthropic(api_key=key, max_retries=0, timeout=15)
+        return [m.id for m in client.models.list(limit=100)]
+    if provider == "openai":
+        data = _get("https://api.openai.com/v1/models", {"Authorization": f"Bearer {key}"})
+        ids = [m["id"] for m in data.get("data", [])]
+        return sorted((i for i in ids if i.startswith(("gpt-", "o"))), reverse=True)
+    if provider == "gemini":
+        data = _get("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", {"x-goog-api-key": key})
+        out = []
+        for m in data.get("models", []):
+            if "generateContent" in m.get("supportedGenerationMethods", []) and "gemini" in m["name"]:
+                out.append(m["name"].removeprefix("models/"))
+        return sorted(out, reverse=True)
+    return []
