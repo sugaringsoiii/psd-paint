@@ -758,6 +758,17 @@ def structured_to_assignments(job, answer):
             layer = name_of.get(pid) or LAYER_OF_PART.get(part["part"], part["part"])
             for k in part.get("regions", []):
                 out[int(k)] = {"region": int(k), "palette": pid, "layer": layer}
+    # 사물(의자·컵·폰 등)은 사물마다 밝은 회색 하나로 칠한다. 조각마다 다른 회색이면 옷처럼 튀어 보인다
+    for n, obj in enumerate(answer.get("objects", [])):
+        if not obj.get("regions"):
+            continue
+        tone = (215, 200, 228)[n % 3]
+        pid = f"auto:사물:{obj.get('name', n)}"
+        if pid not in name_of:
+            job.palette.append({"id": pid, "rgb": (tone, tone, tone), "name": "사물"})
+            name_of[pid] = "사물"
+        for k in obj["regions"]:
+            out[int(k)] = {"region": int(k), "palette": pid, "layer": "사물"}
     # 결과를 보고 고친 번호 (MCP·요청 폴더에서 덧붙인 수정)
     layer_of = {v["palette"]: v["layer"] for v in out.values()}
     for c in answer.get("corrections", []):
