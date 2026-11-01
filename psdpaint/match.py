@@ -54,6 +54,7 @@ class Job:
     groups: np.ndarray = None   # 지도 번호 순서의 묶음 id (선이 끊겨 이어진 영역끼리 같다)
     areas: np.ndarray = None    # 지도 번호 순서의 영역 넓이
     map_label: str = "[원고 지도]"  # map_images 앞에 붙이는 이름표 (단계마다 다르다)
+    occlusion_text: str = "없음"     # 가림 단서 (좁은 띠를 사이에 둔 번호 쌍)
     full_map: Image.Image = None  # 번호를 얹은 전체 원고 지도
     kmap: np.ndarray = None       # 픽셀 → 지도 번호
 
@@ -97,7 +98,7 @@ def region_groups(labels, boundary, cand_ids):
     return of[cand_ids]
 
 
-def build_map(labels, boundary, cand_ids, colors=None, groups=None):
+def build_map(labels, boundary, cand_ids, colors=None, groups=None, hatch=None):
     """원고 지도: 칠할 영역마다 색과 번호. → (이미지 목록, 지도 번호 → 영역 번호 배열)
 
     colors가 없으면 묶음(groups)마다 옅은 임의의 색을 쓴다. 같은 묶음은 같은 바탕색이 된다.
@@ -112,6 +113,12 @@ def build_map(labels, boundary, cand_ids, colors=None, groups=None):
         colors = np.full((len(cand_ids), 3), 255)
     tint = np.vstack([[255, 255, 255], colors]).astype(np.uint8)
     rgb = tint[kmap]
+    if hatch is not None:
+        # 가림 띠는 회색 빗금으로 보여 준다 (앞에 있는 사물이라는 표시)
+        yy, xx = np.nonzero(hatch)
+        on = ((yy + xx) // 4) % 2 == 0
+        rgb[yy[on], xx[on]] = (150, 150, 150)
+        rgb[yy[~on], xx[~on]] = (225, 225, 225)
     rgb[boundary] = 0
     img = Image.fromarray(rgb)
     draw = ImageDraw.Draw(img)
@@ -210,9 +217,43 @@ def palette_from_image(rgba, quantize, tol, min_share):
     return palette, masks
 
 
-def make_job(labels, boundary, cand_ids, ref_rgb, palette, masks):
+def occlusion_cues(labels, cand_ids, bg_mask, reach=16, min_area=600):
+    """두 조각 사이에 좁고 긴 배경 통로가 끼어 있는 쌍을 찾는다 (의자 등받이·난간·끈 같은 가림).
+
+    바로 맞닿은 이웃은 선 하나만 사이에 있지만, 가려진 이웃은 그 사이에 배경이 파고든 띠가 있다.
+    두 조각을 reach만큼 넓혔을 때 겹치는 곳 중 배경이 min_area 이상이면 가림 쌍으로 본다.
+    → ([(지도 번호 a, 지도 번호 b)], 띠 마스크)
+    """
+    h, w = labels.shape
+    boxes = ndimage.find_objects(labels)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * reach + 1, 2 * reach + 1))
+    grown = {}
+    for k in cand_ids:
+        sl = boxes[k - 1]
+        y0, y1 = max(sl[0].start - reach, 0), min(sl[0].stop + reach, h)
+        x0, x1 = max(sl[1].start - reach, 0), min(sl[1].stop + reach, w)
+        grown[k] = (y0, x0, cv2.dilate((labels[y0:y1, x0:x1] == k).astype(np.uint8), kernel) > 0)
+    pairs, strip = [], np.zeros((h, w), bool)
+    for i, a in enumerate(cand_ids):
+        ay, ax, ma = grown[a]
+        for j in range(i + 1, len(cand_ids)):
+            by, bx, mb = grown[cand_ids[j]]
+            y0, x0 = max(ay, by), max(ax, bx)
+            y1, x1 = min(ay + ma.shape[0], by + mb.shape[0]), min(ax + ma.shape[1], bx + mb.shape[1])
+            if y1 <= y0 or x1 <= x0:
+                continue
+            between = ma[y0 - ay:y1 - ay, x0 - ax:x1 - ax] & mb[y0 - by:y1 - by, x0 - bx:x1 - bx] & bg_mask[y0:y1, x0:x1]
+            if between.sum() >= min_area:
+                pairs.append((i + 1, j + 1))
+                strip[y0:y1, x0:x1] |= between
+    return pairs, strip
+
+
+def make_job(labels, boundary, cand_ids, ref_rgb, palette, masks, bg_mask=None):
     groups = region_groups(labels, boundary, cand_ids)
-    map_images, cands = build_map(labels, boundary, cand_ids, groups=groups)
+    pairs, strip = occlusion_cues(labels, cand_ids, bg_mask) if bg_mask is not None else ([], None)
+    occlusion_text = " ".join(f"{a}↔{b}" for a, b in pairs) or "없음"
+    map_images, cands = build_map(labels, boundary, cand_ids, groups=groups, hatch=strip)
     ref_images = build_reference(ref_rgb, masks, palette)
     ids = [p["id"] for p in palette]
     palette_list = ", ".join(f"{p['id']}=#{p['rgb'][0]:02X}{p['rgb'][1]:02X}{p['rgb'][2]:02X}"
@@ -221,10 +262,10 @@ def make_job(labels, boundary, cand_ids, ref_rgb, palette, masks):
     areas = np.bincount(labels.ravel(), minlength=labels.max() + 1)[cand_ids]
     full_map, kmap = build_map.last
     prompt = FULL_PROMPT.format(parts=", ".join(PARTS), palette_list=palette_list, count=len(cand_ids),
-                                groups=group_text(groups=groups))
+                                groups=group_text(groups=groups), occlusion=occlusion_text)
     schema = full_schema(ids)
     return Job(cands, palette, ref_images, map_images, prompt, schema, palette_text=palette_list,
-               groups=groups, areas=areas, full_map=full_map, kmap=kmap)
+               groups=groups, areas=areas, occlusion_text=occlusion_text, full_map=full_map, kmap=kmap)
 
 
 def _b64(img):
@@ -486,7 +527,10 @@ SCENE_RULES = """장면을 이해하는 순서
 3. 옷은 겹침 순서로 나눈다. 겉옷(재킷·가디건·코트) / 상의(스웨터·니트·티셔츠·조끼) / 셔츠(깃·소매 끝) / 넥타이·리본 / 하의 / 치마 / 신발 / 양말.
    팔 전체가 겉옷 소매면 소매 조각은 모두 겉옷이다. 소매 끝으로 보이는 셔츠 조각만 셔츠다.
 4. 주름선이나 끊긴 선으로 나뉜 조각은 같은 옷이다. 의자 등받이·책상·다른 사람 팔처럼 앞에 있는 사물이 몸을 가로질러
-   나눈 조각도 같은 옷이다 (가려진 너머로 옷이 이어진다). 아래 '이어진 묶음'의 번호들은 선이 끊긴 틈으로 이어진 한 덩어리다.
+   나눈 조각도 같은 옷이다 (가려진 너머로 옷이 이어진다).
+   아래 '가림 단서'는 두 조각 사이에 좁고 긴 띠(지도에 회색 빗금)가 끼어 있는 쌍이다. 띠는 앞에 있는 사물이고 몸은 그 뒤로 이어진다.
+   띠 양쪽에서 옷의 바깥선(실루엣)이 이어지고 몸의 높이가 맞으면 같은 부위로 묶는다
+   (등을 가로지르는 띠 아래는 아직 상의다. 하의는 엉덩이·다리부터다). 실루엣이 이어지지 않으면 따로 둔다. 아래 '이어진 묶음'의 번호들은 선이 끊긴 틈으로 이어진 한 덩어리다.
    지도는 흰 바탕의 선화에 번호만 얹은 것이다. 색은 그림에 없으므로 옷 색을 짐작해 적지 않는다.
 5. 피부는 얼굴·목·귀·손·팔·다리처럼 맨살이 보이는 곳이다. 머리카락과 얼굴 경계를 특히 조심한다(앞머리 사이로 보이는 이마는 피부).
 6. 의자·컵·폰 같은 사물은 objects에, 하늘·벽·바닥 같은 배경은 background에 넣는다.
@@ -516,6 +560,7 @@ FULL_PROMPT = """웹툰 밑색 작업이다. 이미지 두 묶음을 준다.
 - objects: 사물 이름과 번호 목록. background: 배경 번호 목록.
 부위 이름: {parts}
 이어진 묶음: {groups}
+가림 단서: {occlusion}
 팔레트: {palette_list}
 영역 번호: 1 ~ {count}"""
 
@@ -527,6 +572,7 @@ SCENE_PROMPT = """웹툰 밑색 작업의 첫 단계다. [원고 지도]는 칠�
 답 형식: analysis(장면 요약), people(id, description, pose, parts[part, regions]), objects(name, regions), background(번호 목록)
 부위 이름: {parts}
 이어진 묶음: {groups}
+가림 단서: {occlusion}
 영역 번호: 1 ~ {count}"""
 
 ZOOM_PROMPT = """웹툰 밑색 작업의 확대 검토다. [인물 확대]는 인물마다 원고 지도를 크게 잘라 낸 그림이다(번호가 같다).
@@ -539,6 +585,7 @@ ZOOM_PROMPT = """웹툰 밑색 작업의 확대 검토다. [인물 확대]는 �
 
 앞 단계 결과:
 {scene}
+가림 단서: {occlusion}
 부위 이름: {parts}"""
 
 COLOR_PROMPT = """웹툰 밑색 작업의 색 정하기 단계다.
@@ -637,7 +684,8 @@ def person_crops(job, scene, max_side=1000):
 
 def _sub(job, ref_images, map_images, prompt, schema, map_label="[원고 지도]"):
     return Job(job.candidates, job.palette, ref_images, map_images, prompt, schema, palette_text=job.palette_text,
-               groups=job.groups, areas=job.areas, map_label=map_label, full_map=job.full_map, kmap=job.kmap)
+               groups=job.groups, areas=job.areas, map_label=map_label, occlusion_text=job.occlusion_text,
+               full_map=job.full_map, kmap=job.kmap)
 
 
 def ask_structured(job, provider, api_key, model, zoom=True, say=None):
@@ -656,13 +704,15 @@ def ask_structured(job, provider, api_key, model, zoom=True, say=None):
     count = len(job.candidates) - 1
     say("AI 장면 이해 중")
     scene = run(_sub(job, [], job.map_images, SCENE_PROMPT.format(parts=", ".join(PARTS), count=count,
-                                                                   groups=group_text(job)),
+                                                                   groups=group_text(job),
+                                                                   occlusion=job.occlusion_text),
                      scene_schema()))
     crops = person_crops(job, scene)
     if zoom and crops:
         say("AI 인물별 확대 검토 중")
         z = run(_sub(job, [], [im for _, im in crops],
-                     ZOOM_PROMPT.format(scene=_scene_text(scene), parts=", ".join(PARTS)), scene_schema(),
+                     ZOOM_PROMPT.format(scene=_scene_text(scene), parts=", ".join(PARTS),
+                                        occlusion=job.occlusion_text), scene_schema(),
                      "[인물 확대]"))
         fixed = {p["id"]: p for p in z.get("people", [])}
         scene["people"] = [fixed.get(p["id"], p) for p in scene.get("people", [])]

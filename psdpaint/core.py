@@ -523,7 +523,7 @@ def ai_match(mismatch, labels, n, boundary, frame, opts, out_path, say):
         palette, masks = match.palette_from_image(rgba, quantize, opts.color_tol, opts.color_min_share)
     if not palette:
         raise PaintError("레퍼런스에서 밑색을 찾지 못했습니다")
-    job = match.make_job(labels, boundary, cand, mismatch.ref_rgb, palette, masks)
+    job = match.make_job(labels, boundary, cand, mismatch.ref_rgb, palette, masks, bg_mask=bg[labels])
 
     if opts.ai_mode == "files":
         folder = Path(out_path).with_name(Path(out_path).stem + "_AI매칭")
