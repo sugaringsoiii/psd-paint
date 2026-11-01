@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 import threading
+from dataclasses import replace
 
 from . import ai, style
 from .cli import output_path
@@ -26,6 +27,7 @@ from .core import (AwaitingAnswer, Options, PaintError, next_options, paint, qui
 
 APP_NAME = "psd-paint"
 COL_FILE, COL_STATUS, COL_INFO = range(3)
+REF_ROLE = Qt.UserRole + 1  # 파일별 레퍼런스 경로 (없으면 설정 탭의 공통 참고 방식)
 LABEL_W = 96  # 설정 탭 라벨 고정폭
 
 
@@ -73,23 +75,26 @@ class Worker(QObject):
 
     def __init__(self, jobs, opts):
         super().__init__()
-        self.jobs = jobs  # [(행 번호, 원본, 결과 경로)]
+        self.jobs = jobs  # [(행 번호, 원본, 결과 경로, 파일별 레퍼런스 또는 None)]
         self.opts = opts
         self.stop = False
 
     def run(self):
-        opts = self.opts
-        for row, src, dst in self.jobs:
+        chained = self.opts
+        for row, src, dst, ref in self.jobs:
             if self.stop:
                 break
             self.started_file.emit(row)
             t = time.time()
+            # 파일별 레퍼런스가 있으면 그것을, 없으면 공통 설정(또는 앞 파일 결과)을 쓴다
+            opts = replace(self.opts, hint_source="psd" if ref.lower().endswith(".psd") else "image",
+                           hint_path=ref) if ref else chained
             try:
                 Path(dst).parent.mkdir(parents=True, exist_ok=True)
                 result = paint(src, dst, opts,
                                progress=lambda msg, frac, row=row: self.progressed.emit(row, msg, frac))
                 self.finished_file.emit(row, result, time.time() - t)
-                opts = next_options(opts, result)  # 연속 모드: 이 결과를 다음 파일의 레퍼런스로
+                chained = next_options(opts, result)  # 연속 모드: 이 결과를 다음 파일의 레퍼런스로
             except AwaitingAnswer as e:
                 self.waiting_file.emit(row, str(e))
             except PaintError as e:
@@ -239,7 +244,7 @@ class MainWindow(QMainWindow):
         self.run_btn = QPushButton("밑색 칠하기")
         self.run_btn.setObjectName("primary")
         self.run_btn.setShortcut("Ctrl+Return")
-        self.run_btn.clicked.connect(self.start)
+        self.run_btn.clicked.connect(lambda: self.start())
 
         row = QHBoxLayout()
         row.addLayout(names)
@@ -251,6 +256,8 @@ class MainWindow(QMainWindow):
     def build_left(self):
         self.files = FileList()
         self.files.files_dropped.connect(self.add_files)
+        self.files.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.files.customContextMenuRequested.connect(self.file_menu)
         self.files.currentItemChanged.connect(self.show_selected)
 
         add_btn = QPushButton("파일 추가")
@@ -689,6 +696,54 @@ class MainWindow(QMainWindow):
             self.files.addTopLevelItem(item)
         self.update_summary()
 
+    def file_menu(self, pos):
+        """파일 목록 우클릭 메뉴: 선택한 파일만 칠하기, 파일별 레퍼런스 지정·해제, 결과 열기, 제거"""
+        items = self.files.selectedItems()
+        if not items:
+            item = self.files.itemAt(pos)
+            if item is None:
+                return
+            item.setSelected(True)
+            items = [item]
+        rows = [self.files.indexOfTopLevelItem(i) for i in items]
+        running = self.worker is not None
+        menu = QMenu(self)
+        run = menu.addAction(f"선택한 파일만 칠하기 ({len(rows)}개)")
+        run.setEnabled(not running)
+        menu.addSeparator()
+        set_ref = menu.addAction("레퍼런스 지정…")
+        clear_ref = menu.addAction("레퍼런스 지정 해제")
+        clear_ref.setEnabled(any(i.data(COL_FILE, REF_ROLE) for i in items))
+        menu.addSeparator()
+        open_res = menu.addAction("결과 파일 열기")
+        open_res.setEnabled(len(rows) == 1 and rows[0] in self.results)
+        remove = menu.addAction("목록에서 제거")
+        remove.setEnabled(not running)
+        chosen = menu.exec(self.files.viewport().mapToGlobal(pos))
+        if chosen is run:
+            self.start(rows)
+        elif chosen is set_ref:
+            path, _ = QFileDialog.getOpenFileName(self, "이 파일의 레퍼런스", self.settings.value("last_dir", ""),
+                                                  "레퍼런스 (*.png *.jpg *.jpeg *.webp *.psd)")
+            if path:
+                for i in items:
+                    self.set_item_ref(i, path)
+        elif chosen is clear_ref:
+            for i in items:
+                self.set_item_ref(i, None)
+        elif chosen is open_res:
+            open_path(self.results[rows[0]].out_path)
+        elif chosen is remove:
+            self.remove_selected()
+
+    @staticmethod
+    def set_item_ref(item, path):
+        """파일별 레퍼런스를 지정하고 파일 이름 옆에 표시한다."""
+        item.setData(COL_FILE, REF_ROLE, path)
+        name = Path(item.data(COL_FILE, Qt.UserRole)).name
+        item.setText(COL_FILE, f"{name}   ↳ {Path(path).name}" if path else name)
+        item.setToolTip(COL_FILE, item.data(COL_FILE, Qt.UserRole) + (f"\n레퍼런스: {path}" if path else ""))
+
     def remove_selected(self):
         for item in self.files.selectedItems():
             self.files.takeTopLevelItem(self.files.indexOfTopLevelItem(item))
@@ -710,9 +765,11 @@ class MainWindow(QMainWindow):
         item.setForeground(COL_STATUS, QColor(color))
 
     # ---- 실행 ----
-    def start(self):
+    def start(self, rows=None):
+        """rows가 있으면 그 행만, 없으면 목록 전체를 칠한다."""
         n = self.files.topLevelItemCount()
-        if not n:
+        rows = list(range(n)) if rows is None else sorted(rows)
+        if not n or not rows:
             QMessageBox.information(self, APP_NAME, "PSD 파일을 먼저 추가하세요.")
             return
         if self.other_dir.isChecked() and not self.out_dir.text().strip():
@@ -721,19 +778,21 @@ class MainWindow(QMainWindow):
         self.save_settings()
         out_dir = self.out_dir.text().strip() if self.other_dir.isChecked() else None
         jobs = []
-        for row in range(n):
+        for row in rows:
             item = self.files.topLevelItem(row)
             src = item.data(COL_FILE, Qt.UserRole)
-            jobs.append((row, src, output_path(src, out_dir, self.suffix.text())))
+            jobs.append((row, src, output_path(src, out_dir, self.suffix.text()), item.data(COL_FILE, REF_ROLE)))
             self.set_status(item, "대기", style.MUTED)
             item.setText(COL_INFO, "")
-        self.results.clear()
+            self.results.pop(row, None)
+            self.edits.pop(row, None)
         self.done_count = 0
         self.waiting = 0
-        self.total_bar.setRange(0, n * 100)
+        self.job_rows = set(rows)
+        self.total_bar.setRange(0, len(jobs) * 100)
         self.total_bar.setValue(0)
         self.set_running(True)
-        self.log.appendPlainText(f"── {n}개 파일 시작")
+        self.log.appendPlainText(f"── {len(jobs)}개 파일 시작")
 
         self.thread = QThread()
         # macOS 기본 스레드 스택(512KB)으로는 psd-tools·scipy 처리 중 스택이 넘친다
@@ -813,8 +872,8 @@ class MainWindow(QMainWindow):
         self.total_bar.setValue(self.done_count * 100)
 
     def on_all_done(self):
-        ok = len(self.results)
-        for row in range(self.files.topLevelItemCount()):
+        ok = sum(1 for r in self.job_rows if r in self.results)
+        for row in self.job_rows:  # 이번에 돌린 파일 중 처리하지 못한 것만 표시한다
             item = self.files.topLevelItem(row)
             if item.text(COL_STATUS) == "대기":
                 self.set_status(item, "중지됨", style.WARN)
