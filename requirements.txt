@@ -6,3 +6,5 @@ scipy>=1.14
 PySide6>=6.8
 anthropic>=2.0
 keyring>=25
+truststore>=0.10
+certifi

@@ -81,8 +81,10 @@ def test_connection(provider, key, model=""):
         if e.code == 400:
             return False, "API 키가 올바르지 않거나 요청이 거부되었습니다"
         return False, f"오류 {e.code}"
-    except urllib.error.URLError:
-        return False, "네트워크에 연결할 수 없습니다"
+    except urllib.error.URLError as e:
+        if "CERTIFICATE" in str(e.reason):
+            return False, "HTTPS 인증서를 확인하지 못했습니다 (회사 보안 프로그램이나 인증서 설정을 확인하세요)"
+        return False, f"네트워크에 연결할 수 없습니다 ({e.reason})"
 
 
 def list_models(provider, key):

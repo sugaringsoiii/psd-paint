@@ -236,6 +236,8 @@ def _post(url, headers, body, timeout=600):
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")[:500]
         raise RuntimeError(f"AI 요청 실패 ({e.code}): {detail}") from None
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"AI 서버에 연결하지 못했습니다: {e.reason}") from None
 
 
 def _strip_schema(node):
