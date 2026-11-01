@@ -25,6 +25,14 @@ class Options:
     pocket_gap_px: int = 6      # 잔머리 틈을 막을 때 선을 넓히는 거리
     pocket_max: int = 6000      # 이보다 넓게 갇힌 배경은 채우지 않는다
     offset_px: int = 2          # 밑색 바깥 윤곽을 안쪽으로 줄이는 거리
+    auto_fill: bool = True      # 힌트 없는 영역(엑스트라 등)을 회색으로 자동 칠하기. 참고 폴더가 없어도 동작한다
+    auto_layer: str = "자동"
+    auto_tones: tuple = (235, 215, 195, 175, 155, 135, 115)  # 자동 칠하기 회색. 맞닿은 영역끼리 겹치지 않게 고른다
+    bg_contact: float = 0.4     # 둘레의 이 비율 이상이 컷 테두리에 닿은 힌트 없는 영역은 배경으로 본다
+    max_layers: int = 10        # 밑색 레이어 수 상한 (0 = 제한 없음). 넘으면 작은 레이어부터 '기타'로 합친다
+    other_layer: str = "기타"
+    background: list = field(default_factory=lambda: ["배경*", "*background*", "BG*", "bg*"])  # 배경 레이어·폴더 이름 패턴
+    hide_background: bool = True  # 결과 PSD에서 배경 레이어·폴더를 끈다
 
 
 @dataclass
@@ -34,6 +42,8 @@ class Result:
     regions: int
     hinted: int
     unhinted_large: int
+    auto: int = 0               # 자동으로 칠한 영역 수
+    merged: list = field(default_factory=list)  # '기타'로 합친 레이어
     preview: Image.Image = None  # 선화 + 밑색 축소 이미지
 
 
@@ -50,17 +60,19 @@ def read_hints(psd, opts):
 
     폴더면 하위 레이어 이름이 밑색 레이어 이름이 된다. 레이어 하나면 색마다 레이어를 나눈다.
     """
+    key_map = np.full((psd.height, psd.width), -1, np.int32)
     hint = psdio.find(psd, opts.hint_group)
     if hint is None:
+        if opts.auto_fill:
+            return key_map, [], []
         raise PaintError(f"'{opts.hint_group}' 힌트 폴더나 레이어가 없습니다")
     if hint.is_group():
         sources = [(layer.name, layer) for layer in hint if not layer.is_group()]
     else:
         sources = [(None, hint)]
-    if not sources:
+    if not sources and not opts.auto_fill:
         raise PaintError(f"'{opts.hint_group}' 폴더 안에 힌트 레이어가 없습니다")
 
-    key_map = np.full((psd.height, psd.width), -1, np.int32)
     keys = []
     for name, layer in sources:  # 아래 레이어부터 칠해 위 레이어가 덮는다
         rgba = psdio.canvas_rgba(layer, psd)
@@ -79,24 +91,28 @@ def read_hints(psd, opts):
 
 
 def segment(psd, opts):
+    """선화와 컷 테두리로 닫힌 영역을 나눈다. → (선화 폴더, 경계, 컷 테두리, 영역 번호 맵, 영역 수)"""
     line_group = psdio.find(psd, opts.line_group, True)
     if line_group is None:
         raise PaintError(f"'{opts.line_group}' 선화 폴더가 없습니다")
-    line = psdio.group_alpha(line_group, psd) > 80
-    boundary = line.copy()
+    # 선화 폴더 안의 배경 선은 경계에서 뺀다 (배경이 잘게 쪼개지지 않게)
+    with psdio.hidden(psdio.matching(line_group, opts.background)):
+        line = psdio.group_alpha(line_group, psd) > 80
+    frame = np.zeros_like(line)
     for layer in psdio.find_pixel_layers(psd, opts.extra_boundary):
-        # 숨긴 레이어와 캔버스 절반 이상을 덮는 레이어(컷 배경 등)는 경계가 아니다
-        if not layer.is_visible():
+        # 숨긴 레이어, 배경, 캔버스 절반 이상을 덮는 레이어(컷 배경 등)는 경계가 아니다
+        if not layer.is_visible() or psdio.matches(layer.name, opts.background):
             continue
         a = psdio.canvas_rgba(layer, psd)[..., 3] > 80
         if a.mean() < 0.5:
-            boundary |= a
+            frame |= a
+    boundary = line | frame
     closed = cv2.dilate(boundary.astype(np.uint8), _disk(1), iterations=opts.gap_close_px) > 0
     labels, n = ndimage.label(~closed)
-    return line_group, boundary, labels, n
+    return line_group, boundary, frame, labels, n
 
 
-def assign(labels, n, key_map, opts):
+def assign_hints(labels, n, key_map, opts):
     """영역마다 가장 많이 칠해진 힌트 키. 힌트가 없으면 -1."""
     region_key = np.full(n + 1, -1, np.int64)
     m = (key_map >= 0) & (labels > 0)
@@ -110,9 +126,82 @@ def assign(labels, n, key_map, opts):
         first = np.r_[True, lab[1:] != lab[:-1]]
         ok = first & (counts >= opts.min_hint_px)
         region_key[lab[ok]] = key[ok]
-    hinted = int((region_key[1:] >= 0).sum())
+    return region_key
 
-    # 힌트 없는 작은 영역은 둘레 12px 안에서 가장 많이 맞닿은 힌트 영역을 따른다
+
+def find_background(labels, n, frame, region_key, opts):
+    """힌트 없는 영역 중 배경으로 볼 영역. 컷마다 가장 큰 영역, 그리고 둘레 대부분이 컷 테두리에 닿은 영역."""
+    areas = np.bincount(labels.ravel(), minlength=n + 1)
+    unhinted = region_key < 0
+    unhinted[0] = False
+    bg = np.zeros(n + 1, bool)
+
+    # 컷 = 컷 테두리로 나뉜 칸 (테두리가 없으면 페이지 전체)
+    panels, _ = ndimage.label(~(cv2.dilate(frame.astype(np.uint8), _disk(3)) > 0))
+    m = labels > 0
+    pairs = np.unique(labels[m].astype(np.int64) * (panels.max() + 1) + panels[m], return_counts=True)
+    lab, pan = pairs[0] // (panels.max() + 1), pairs[0] % (panels.max() + 1)
+    order = np.lexsort((-pairs[1], lab))
+    lab, pan = lab[order], pan[order]
+    first = np.r_[True, lab[1:] != lab[:-1]]
+    region_panel = np.zeros(n + 1, np.int64)
+    region_panel[lab[first]] = pan[first]
+    for p in np.unique(region_panel[1:]):
+        cand = np.nonzero(unhinted & (region_panel == p))[0]
+        if cand.size:
+            bg[cand[np.argmax(areas[cand])]] = True
+
+    # 컷 구석처럼 둘레 대부분이 테두리에 닿은 영역
+    edge = (labels > 0) & (cv2.dilate((labels == 0).astype(np.uint8), _disk(1)) > 0)
+    near_frame = cv2.dilate(frame.astype(np.uint8), _disk(opts.gap_close_px + 3)) > 0
+    perim = np.bincount(labels[edge], minlength=n + 1)
+    touch = np.bincount(labels[edge & near_frame], minlength=n + 1)
+    bg |= unhinted & (touch >= opts.bg_contact * np.maximum(perim, 1)) & (touch > 0)
+    return bg
+
+
+def adjacency(labels, reach=12):
+    """선을 사이에 두고 맞닿은 영역 쌍 (a < b)."""
+    pairs = set()
+    h, w = labels.shape
+    for dy, dx in ((0, reach), (reach, 0), (reach, reach), (reach, -reach)):
+        a = labels[:h - dy, max(0, -dx):w - max(0, dx)]
+        b = labels[dy:, max(0, dx):w - max(0, -dx)]
+        m = (a > 0) & (b > 0) & (a != b)
+        if m.any():
+            lo, hi = np.minimum(a[m], b[m]), np.maximum(a[m], b[m])
+            pairs.update(zip(*np.unique(np.stack([lo, hi]), axis=1)))
+    return pairs
+
+
+def auto_color(labels, n, region_key, bg, keys, opts):
+    """힌트도 배경도 아닌 큰 영역에 회색을 고른다. 맞닿은 영역과 같은 회색은 피한다. → 자동으로 칠한 영역 수"""
+    areas = np.bincount(labels.ravel(), minlength=n + 1)
+    todo = np.nonzero((region_key < 0) & ~bg & (areas >= opts.small_area))[0]
+    todo = todo[todo > 0]
+    if not todo.size:
+        return 0
+    base = len(keys)
+    keys.extend((opts.auto_layer, (t, t, t)) for t in opts.auto_tones)
+    tone_of = {}  # 영역 → 회색 값
+    for k in np.nonzero(region_key >= 0)[0]:
+        tone_of[k] = keys[region_key[k]][1][0]
+    neigh = {}
+    for a, b in adjacency(labels):
+        neigh.setdefault(int(a), []).append(int(b))
+        neigh.setdefault(int(b), []).append(int(a))
+    rng = np.random.default_rng(0)
+    for i in todo[np.argsort(-areas[todo])]:  # 큰 영역부터
+        used = {tone_of.get(j) for j in neigh.get(int(i), [])}
+        choices = [t for t in opts.auto_tones if t not in used] or list(opts.auto_tones)
+        t = choices[rng.integers(len(choices))]
+        tone_of[int(i)] = t
+        region_key[i] = base + opts.auto_tones.index(t)
+    return int(todo.size)
+
+
+def merge_small(labels, n, region_key, opts):
+    """힌트 없는 작은 영역은 둘레 12px 안에서 가장 많이 맞닿은 칠한 영역을 따른다."""
     areas = np.bincount(labels.ravel(), minlength=n + 1)
     boxes = ndimage.find_objects(labels)
     for i in range(1, n + 1):
@@ -125,8 +214,29 @@ def assign(labels, n, key_map, opts):
         neigh = neigh[(neigh > 0) & (region_key[neigh] >= 0)]
         if neigh.size:
             region_key[i] = region_key[np.bincount(neigh).argmax()]
-    unhinted_large = int(((region_key < 0) & (areas >= opts.small_area))[1:].sum())
-    return region_key, hinted, unhinted_large
+
+
+def cap_layers(cls, keys, names_top_down, opts):
+    """레이어가 max_layers를 넘으면 칠한 면적이 작은 레이어부터 '기타'로 합친다. → 합친 레이어 이름"""
+    if not opts.max_layers:
+        return []
+    count = np.bincount(cls.ravel(), minlength=len(keys) + 1)
+    area = {}
+    for k, (name, _) in enumerate(keys, 1):
+        area[name] = area.get(name, 0) + int(count[k])
+    used = [nm for nm in names_top_down if area.get(nm, 0) > 0]
+    if len(used) <= opts.max_layers:
+        return []
+    keep = set(sorted(used, key=lambda nm: -area[nm])[:opts.max_layers - 1])
+    merged = [nm for nm in used if nm not in keep]
+    for k, (name, rgb) in enumerate(keys):
+        if name in merged:
+            keys[k] = (opts.other_layer, rgb)
+    at = names_top_down.index(merged[0])
+    rest = [nm for nm in names_top_down if nm not in merged]
+    rest.insert(min(at, len(rest)), opts.other_layer)
+    names_top_down[:] = list(dict.fromkeys(rest))
+    return merged
 
 
 def fill(labels, boundary, region_key, keys, opts):
@@ -196,6 +306,9 @@ def write(psd, line_group, cls, keys, names_top_down, opts, out_path):
     hint = psdio.find(psd, opts.hint_group)
     if hint is not None:
         hint.visible = False
+    if opts.hide_background:
+        for layer in psdio.matching(psd, opts.background):
+            layer.visible = False
     psd.save(out_path)
     return list(reversed(written))
 
@@ -215,15 +328,29 @@ def paint(psd_path, out_path, opts=None, progress=None):
     say("PSD 여는 중", 0.0)
     psd = PSDImage.open(psd_path)
     say("선화 영역 나누는 중", 0.15)
-    line_group, boundary, labels, n = segment(psd, opts)
-    say("참고 레이어 읽는 중", 0.35)
+    line_group, boundary, frame, labels, n = segment(psd, opts)
+    say("참고 레이어 읽는 중", 0.3)
     key_map, keys, names = read_hints(psd, opts)
-    say("영역에 힌트 대응하는 중", 0.45)
-    region_key, hinted, unhinted_large = assign(labels, n, key_map, opts)
+    say("영역에 힌트 대응하는 중", 0.4)
+    region_key = assign_hints(labels, n, key_map, opts)
+    hinted = int((region_key[1:] >= 0).sum())
+    auto = 0
+    if opts.auto_fill:
+        say("힌트 없는 영역 자동 칠하는 중", 0.5)
+        bg = find_background(labels, n, frame, region_key, opts)
+        auto = auto_color(labels, n, region_key, bg, keys, opts)
+        if auto:
+            names.append(opts.auto_layer)
+    merge_small(labels, n, region_key, opts)
+    areas = np.bincount(labels.ravel(), minlength=n + 1)
+    unhinted_large = int(((region_key < 0) & (areas >= opts.small_area))[1:].sum())
+    if not (region_key >= 0).any():
+        raise PaintError("칠할 영역이 없습니다 (참고 힌트도 자동 칠하기도 없음)")
     say("밑색 채우는 중", 0.6)
     cls = fill(labels, boundary, region_key, keys, opts)
+    merged = cap_layers(cls, keys, names, opts)
     say("PSD 저장 중", 0.85)
     layers = write(psd, line_group, cls, keys, names, opts, out_path)
     preview = make_preview(cls, boundary, keys)
     say("완료", 1.0)
-    return Result(Path(out_path), layers, n, hinted, unhinted_large, preview)
+    return Result(Path(out_path), layers, n, hinted, unhinted_large, auto, merged, preview)

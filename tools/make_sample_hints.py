@@ -22,7 +22,7 @@ MIN_AREA = 50  # 점을 찍기 어려운 아주 작은 영역은 건너뛴다
 def main(src, painted, dst):
     psd = PSDImage.open(src)
     done = PSDImage.open(painted)
-    _, _, labels, n = segment(psd, Options())
+    _, _, _, labels, n = segment(psd, Options())
     depth = ndimage.distance_transform_edt(labels > 0)
 
     flat = psdio.find(done, "밑색", True)

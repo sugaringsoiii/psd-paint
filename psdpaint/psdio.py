@@ -1,5 +1,6 @@
 """PSD 레이어 읽기·쓰기 도우미."""
 import fnmatch
+from contextlib import contextmanager
 
 import numpy as np
 from psd_tools.api.layers import Group, PixelLayer
@@ -22,9 +23,38 @@ def find_pixel_layers(group, patterns):
     """이름이 패턴(* 와일드카드)에 맞는 픽셀 레이어 전부. 폴더는 제외한다."""
     out = []
     for layer in group.descendants():
-        if not layer.is_group() and any(fnmatch.fnmatch(layer.name, p) for p in patterns):
+        if not layer.is_group() and matches(layer.name, patterns):
             out.append(layer)
     return out
+
+
+def matches(name, patterns):
+    """레이어 이름이 패턴(* 와일드카드, 대소문자 무시) 중 하나에 맞는가."""
+    return any(fnmatch.fnmatch(name.lower(), p.lower()) for p in patterns)
+
+
+def matching(group, patterns):
+    """이름이 패턴에 맞는 레이어·폴더. 맞는 폴더의 하위는 따로 넣지 않는다."""
+    out = []
+    for layer in group:
+        if matches(layer.name, patterns):
+            out.append(layer)
+        elif layer.is_group():
+            out += matching(layer, patterns)
+    return out
+
+
+@contextmanager
+def hidden(layers):
+    """블록 안에서만 레이어를 숨긴다."""
+    saved = [(layer, layer.visible) for layer in layers]
+    for layer, _ in saved:
+        layer.visible = False
+    try:
+        yield
+    finally:
+        for layer, vis in saved:
+            layer.visible = vis
 
 
 def canvas_rgba(layer, psd):
