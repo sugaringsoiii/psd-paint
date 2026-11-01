@@ -22,7 +22,8 @@ server = MCPServer(
         "선화 PSD에 밑색 레이어를 자동으로 깔아 주는 도구다. "
         "paint_psd로 칠한다. 레퍼런스가 다른 페이지면 paint_psd가 레퍼런스(P번호 팔레트)와 원고 번호 지도 이미지를 돌려준다. "
         "그때는 이미지를 보고 원고 번호마다 같은 인물·같은 부위의 팔레트를 골라 apply_match를 호출한다. "
-        "판단이 서지 않는 영역과 배경은 none으로 둔다."
+        "판단이 서지 않는 영역과 배경은 none으로 둔다. 엑스트라도 피부는 피부 팔레트를 고른다. "
+        "apply_match가 돌려준 칠한 결과 지도를 보고 틀린 곳이 있으면 한 번 고쳐 다시 호출한다."
     ),
 )
 
@@ -67,7 +68,15 @@ def _run(psd_path, out_path, opts):
         return out
     except PaintError as e:
         return f"실패: {e}"
-    return [_summary(result), _png(result.preview)]
+    out = [_summary(result), _png(result.preview)]
+    folder = _job_folder(out_path)
+    results = sorted(folder.glob("result_*.png")) if folder.exists() else []
+    if results:
+        out.append("[칠한 결과 지도] 번호마다 칠한 색이다. 분홍색은 none(회색 자동)이다. 레퍼런스와 비교해 "
+                   "틀린 번호(인물이 바뀐 색, 회색 피부, 덩어리 안 한 조각만 다른 색)가 있으면 고친 assignments로 "
+                   "apply_match를 다시 호출한다. 고칠 곳이 없으면 끝낸다.")
+        out += [Image(path=p) for p in results]
+    return out
 
 
 @server.tool()

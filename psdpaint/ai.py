@@ -18,6 +18,33 @@ PROVIDERS = {
 }
 # OpenAI·Gemini 기본 목록은 예시다. 실제로 쓸 수 있는 모델은 [목록 불러오기]로 키에서 받아 온다.
 
+# 100만 토큰당 달러 (입력, 출력). 알고 있는 모델만 적는다. 없는 모델은 토큰 수만 보여 준다.
+PRICES = {
+    "claude-opus-5-5": (4.0, 20.0),
+    "claude-sonnet-5-5": (2.0, 10.0),
+    "claude-haiku-5-5": (0.10, 0.50),
+}
+
+
+def estimate_cost(usage):
+    """토큰 사용량 → 예상 비용(달러). 단가를 모르는 모델이면 None."""
+    price = PRICES.get(usage.get("model", ""))
+    if not price:
+        return None
+    return (usage.get("input", 0) * price[0] + usage.get("output", 0) * price[1]) / 1_000_000
+
+
+def describe_usage(usage):
+    """로그에 쓸 한 줄: 모델 · 토큰 · 예상 비용 · 검수에서 고친 수."""
+    text = f"{usage['model']} · 입력 {usage['input']:,} / 출력 {usage['output']:,} 토큰"
+    if usage.get("calls", 1) > 1:
+        text += f" (요청 {usage['calls']}회)"
+    cost = estimate_cost(usage)
+    text += f" · 약 ${cost:.3f}" if cost is not None else " · 단가 미등록(제공자 요금표 참고)"
+    if "fixed" in usage:
+        text += f" · 검수에서 {usage['fixed']}곳 고침"
+    return text
+
 
 def get_key(provider):
     try:

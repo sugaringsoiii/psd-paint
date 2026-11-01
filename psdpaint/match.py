@@ -31,6 +31,11 @@ PROMPT = """웹툰 밑색 작업이다. 이미지 두 묶음을 준다.
 [원고 지도] 지금 칠할 페이지의 선화다. 칠할 영역마다 옅은 색과 숫자를 얹었다.
 
 할 일: 원고 지도의 숫자 영역마다, 레퍼런스에서 같은 인물의 같은 부위에 쓰인 팔레트(P번호)를 고른다.
+
+먼저 analysis에 짧게 적는다.
+1. 레퍼런스 인물마다: 알아볼 특징(머리모양·머리띠·옷차림)과 부위별 팔레트 (예: 고양이 머리띠 소년 = 머리 P2, 머리띠 P5, 재킷 P3, 피부 P6)
+2. 원고 지도 인물마다: 어느 레퍼런스 인물인지와 그 근거, 그리고 그 인물에 속한 번호들
+그다음 assignments에 번호마다 팔레트를 적는다. analysis에 적은 대응과 어긋나지 않게 한다.
 - 머리모양·액세서리·옷차림으로 같은 인물을 알아본다. 같은 인물이면 페이지가 달라도 같은 색을 쓴다.
 - 피부(얼굴·목·손), 머리카락, 옷(재킷·셔츠·넥타이·치마·바지 등), 소품을 구분한다.
 - 피부(얼굴·목·귀·손·팔·다리)는 레퍼런스에 없는 인물(엑스트라)이어도 반드시 피부 팔레트를 고른다. 피부를 none으로 두면 회색으로 칠해진다.
@@ -38,6 +43,21 @@ PROMPT = """웹툰 밑색 작업이다. 이미지 두 묶음을 준다.
 - 배경(하늘·벽·바닥 등)은 "none"이다.
 - 지도의 모든 숫자에 대해 하나씩 답한다.
 {palette_note}
+팔레트: {palette_list}
+영역 번호: 1 ~ {count}"""
+
+REVIEW_PROMPT = """웹툰 밑색 검수다. 이미지 두 묶음을 준다.
+
+[레퍼런스] 같은 작품의 다른 페이지를 칠해 둔 그림이다. 칠한 색마다 P1, P2 … 표시를 얹었다.
+[칠한 결과] 이전 답대로 원고를 칠한 결과다. 영역마다 번호를 얹었다. 분홍색 영역은 none(나중에 회색으로 자동 칠함)이다.
+
+할 일: 레퍼런스와 비교해 잘못 칠한 번호만 고친다.
+- 같은 인물인데 머리·옷 색이 레퍼런스와 다른 곳 (인물을 헷갈려 색이 서로 바뀐 경우 포함)
+- 피부(얼굴·목·귀·손·팔·다리)가 피부 팔레트가 아닌 곳. 엑스트라도 피부는 피부 팔레트다
+- 머리카락·옷 덩어리 안에서 한 조각만 다른 색인 곳
+- 배경인데 칠한 곳은 none
+
+먼저 analysis에 무엇이 틀렸는지 짧게 적고, assignments에는 고칠 번호만 새 팔레트로 적는다. 맞는 번호는 적지 않는다.
 팔레트: {palette_list}
 영역 번호: 1 ~ {count}"""
 
@@ -53,6 +73,7 @@ class Job:
     prompt: str
     schema: dict
     usage: dict = field(default_factory=dict)
+    palette_text: str = ""
 
 
 def _font(size):
@@ -82,14 +103,18 @@ def _pole(mask):
     return int(x), int(y)
 
 
-def build_map(labels, boundary, cand_ids):
-    """원고 지도: 칠할 영역마다 옅은 색과 번호. → (이미지 목록, 지도 번호 → 영역 번호 배열)"""
+def build_map(labels, boundary, cand_ids, colors=None):
+    """원고 지도: 칠할 영역마다 색과 번호. → (이미지 목록, 지도 번호 → 영역 번호 배열)
+
+    colors가 없으면 영역마다 옅은 임의의 색을, 있으면 그 색(번호 순서, 칠한 결과)을 쓴다.
+    """
     h, w = labels.shape
     lut = np.zeros(labels.max() + 1, np.int32)
     lut[cand_ids] = np.arange(1, len(cand_ids) + 1)
     kmap = lut[labels]
-    rng = np.random.default_rng(0)
-    tint = np.vstack([[255, 255, 255], rng.integers(175, 245, (len(cand_ids), 3))]).astype(np.uint8)
+    if colors is None:
+        colors = np.random.default_rng(0).integers(175, 245, (len(cand_ids), 3))
+    tint = np.vstack([[255, 255, 255], colors]).astype(np.uint8)
     rgb = tint[kmap]
     rgb[boundary] = 0
     img = Image.fromarray(rgb)
@@ -198,6 +223,8 @@ def make_job(labels, boundary, cand_ids, ref_rgb, palette, masks):
                              for p in palette)
     prompt = PROMPT.format(palette_note="" if named else NAME_NOTE, palette_list=palette_list, count=len(cand_ids))
     props = {
+        # 번호를 고르기 전에 인물 대응을 먼저 적게 해 인물을 헷갈리는 실수를 줄인다 (답은 이 순서로 나온다)
+        "analysis": {"type": "string"},
         "assignments": {"type": "array", "items": {
             "type": "object",
             "properties": {"region": {"type": "integer"}, "palette": {"type": "string", "enum": ids + ["none"]}},
@@ -209,7 +236,7 @@ def make_job(labels, boundary, cand_ids, ref_rgb, palette, masks):
             "properties": {"palette": {"type": "string", "enum": ids}, "layer": {"type": "string"}},
             "required": ["palette", "layer"], "additionalProperties": False}}
     schema = {"type": "object", "properties": props, "required": list(props), "additionalProperties": False}
-    return Job(cands, palette, ref_images, map_images, prompt, schema)
+    return Job(cands, palette, ref_images, map_images, prompt, schema, palette_text=palette_list)
 
 
 def _b64(img):
@@ -269,10 +296,13 @@ def _strip_schema(node):
 
 
 def _openapi_schema(node):
-    """Gemini responseSchema(OpenAPI 형식): type을 대문자로 쓴다."""
+    """Gemini responseSchema(OpenAPI 형식): type을 대문자로 쓰고 속성 순서를 지정한다."""
     if isinstance(node, dict):
-        return {k: (v.upper() if k == "type" else _openapi_schema(v)) for k, v in node.items()
-                if k != "additionalProperties"}
+        out = {k: (v.upper() if k == "type" else _openapi_schema(v)) for k, v in node.items()
+               if k != "additionalProperties"}
+        if "properties" in node:
+            out["propertyOrdering"] = list(node["properties"])
+        return out
     if isinstance(node, list):
         return [_openapi_schema(v) for v in node]
     return node
@@ -338,6 +368,32 @@ def ask(job, provider, api_key, model):
     if provider == "openai":
         return ask_openai(job, api_key, model)
     raise RuntimeError(f"알 수 없는 AI 제공자: {provider}")
+
+
+NONE_TINT = (255, 170, 210)  # 검수 지도에서 none 영역 색
+
+
+def review_job(job, labels, boundary, answer):
+    """이전 답대로 칠한 지도를 만들어 검수 요청을 꾸린다."""
+    pal = {p["id"]: p["rgb"] for p in job.palette}
+    pick = {item["region"]: item["palette"] for item in answer.get("assignments", [])}
+    cand_ids = job.candidates[1:]
+    colors = np.array([pal.get(pick.get(k), NONE_TINT) for k in range(1, len(cand_ids) + 1)], np.uint8)
+    maps, _ = build_map(labels, boundary, cand_ids, colors)
+    prompt = REVIEW_PROMPT.format(palette_list=job.palette_text, count=len(cand_ids))
+    schema = {k: v for k, v in job.schema.items()}
+    schema["properties"] = {k: v for k, v in job.schema["properties"].items() if k != "layer_names"}
+    schema["required"] = list(schema["properties"])
+    return Job(job.candidates, job.palette, job.ref_images, maps, prompt, schema, palette_text=job.palette_text)
+
+
+def merge_review(answer, review):
+    """검수에서 고친 번호만 덮어쓴다."""
+    fixed = {item["region"]: item["palette"] for item in review.get("assignments", [])}
+    merged = [{"region": a["region"], "palette": fixed.pop(a["region"], a["palette"])}
+              for a in answer.get("assignments", [])]
+    merged += [{"region": k, "palette": v} for k, v in fixed.items()]
+    return {**answer, "assignments": merged, "review": review.get("analysis", ""), "fixed": len(review.get("assignments", []))}
 
 
 def save_job(job, folder):

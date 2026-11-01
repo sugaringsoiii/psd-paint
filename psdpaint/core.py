@@ -22,6 +22,7 @@ class Options:
     ai_provider: str = "claude"
     ai_model: str = "claude-opus-5-5"
     ai_key: str = ""                    # 실행할 때만 넘긴다. 설정 파일에 저장하지 않는다
+    ai_review: bool = True              # 칠한 결과를 AI가 한 번 더 보고 틀린 곳을 고친다 (요청 1회 추가)
     extra_boundary: list = field(default_factory=lambda: ["컷*", "*테두리*"])  # 경계로 쓸 픽셀 레이어 이름 패턴
     output_group: str = "밑색"
     gap_close_px: int = 2       # 선을 이만큼 두껍게 해서 작은 틈을 막는다
@@ -536,8 +537,29 @@ def ai_match(mismatch, labels, n, boundary, frame, opts, out_path, say):
         say(f"AI 매칭 중 (영역 {len(cand)}개)", 0.4)
         try:
             answer = match.ask(job, opts.ai_provider, opts.ai_key, opts.ai_model)
+            usage = dict(job.usage, calls=1)
+            if opts.ai_review:
+                # 칠한 결과를 다시 보여 주고 틀린 번호만 고치게 한다 (요청 1회 추가)
+                say("AI 검수 중", 0.5)
+                rjob = match.review_job(job, labels, boundary, answer)
+                answer = match.merge_review(answer, match.ask(rjob, opts.ai_provider, opts.ai_key, opts.ai_model))
+                usage = {"model": usage["model"], "input": usage["input"] + rjob.usage["input"],
+                         "output": usage["output"] + rjob.usage["output"], "calls": 2, "fixed": answer["fixed"]}
+            job.usage = usage
         except (RuntimeError, ValueError) as e:
             raise PaintError(f"AI 매칭 실패: {e}") from None
+        # 무엇을 틀렸는지 보고 고칠 수 있게 요청과 답을 남긴다.
+        # answer.json을 고친 뒤 'AI 매칭: 요청 폴더' 방식으로 다시 실행하면 고친 답을 쓴다
+        folder = Path(out_path).with_name(Path(out_path).stem + "_AI매칭")
+        match.save_job(job, folder)
+        (folder / "answer.json").write_text(json.dumps(answer, ensure_ascii=False, indent=1))
+    # 칠한 결과 지도(번호 + 칠한 색)를 남긴다. 사람이나 MCP 클라이언트의 AI가 보고 검수한다
+    folder = Path(out_path).with_name(Path(out_path).stem + "_AI매칭")
+    folder.mkdir(parents=True, exist_ok=True)
+    for old in folder.glob("result_*.png"):
+        old.unlink()
+    for i, im in enumerate(match.review_job(job, labels, boundary, answer).map_images, 1):
+        im.convert("RGB").save(folder / f"result_{i}.png")
     region_key, keys = match.apply_answer(job, answer, n)
     names = list(dict.fromkeys(name for name, _ in keys))
     return region_key, keys, names, job.usage

@@ -467,6 +467,9 @@ class MainWindow(QMainWindow):
             combo.setMinimumContentsLength(8)
             combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         add("AI 매칭", self.ai_mode)
+        self.ai_review = QCheckBox("칠한 결과를 한 번 더 보고 고치기 (요청 1회 추가)")
+        self.ai_review.setChecked(s.value("ai_review", True, bool))
+        add("검수", self.ai_review)
         add("제공자", self.provider)
         add("모델", hbox(self.model, self.list_btn))
         add("API 키", hbox(self.api_key, self.test_btn))
@@ -503,6 +506,7 @@ class MainWindow(QMainWindow):
         pid = self.provider.currentData()
         s.setValue("provider", pid)
         s.setValue("ai_mode", self.ai_mode.currentData())
+        s.setValue("ai_review", self.ai_review.isChecked())
         s.setValue(f"model_{pid}", self.model.currentText())
         self.save_api_key()
 
@@ -518,6 +522,7 @@ class MainWindow(QMainWindow):
             ai_provider=self.provider.currentData(),
             ai_model=self.model.currentText().strip() or ai.PROVIDERS[self.provider.currentData()]["model"],
             ai_key=self.api_key.text().strip(),
+            ai_review=self.ai_review.isChecked(),
             extra_boundary=patterns(self.boundary),
             background=patterns(self.background),
             hide_background=self.hide_bg.isChecked(),
@@ -725,7 +730,7 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText(f"    → {result.out_path.name} ({secs:.1f}초) {note}")
         if result.ai_usage:
             u = result.ai_usage
-            self.log.appendPlainText(f"    AI 매칭: {u['model']} · 입력 {u['input']:,} / 출력 {u['output']:,} 토큰")
+            self.log.appendPlainText(f"    AI 매칭: {ai.describe_usage(u)}")
         self.step()
         if self.files.currentItem() is item:
             self.show_selected(item)
