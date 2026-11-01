@@ -30,7 +30,23 @@
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+```
 
+### 앱 (GUI)
+
+```bash
+.venv/bin/python -m psdpaint.gui
+```
+
+- PSD 파일이나 폴더를 창에 끌어 놓거나 [파일 추가…]로 고른다. 같은 파일은 한 번만 들어간다.
+- [▶ 밑색 칠하기]를 누르면 순서대로 처리한다. 파일마다 진행률과 결과를 보여 주고, 실패한 파일은 건너뛴다.
+- [중지]는 지금 처리 중인 파일을 마친 뒤 멈춘다.
+- 완료한 파일을 고르면 오른쪽에 미리보기가 나온다. [파일 열기]는 연결된 앱(예: 클립스튜디오)으로 열고, [폴더에서 보기]는 Finder·탐색기에서 위치를 보여 준다.
+- 설정은 다음 실행 때도 유지된다.
+
+### 명령줄 (CLI)
+
+```bash
 # 여러 파일을 순서대로 처리한다. 실패한 파일은 건너뛰고 계속한다.
 .venv/bin/python -m psdpaint 1화.psd 2화.psd 3화.psd -o 결과폴더
 ```
@@ -57,7 +73,7 @@ python3 -m venv .venv
 
 ## 계획
 
-- [ ] GUI 앱: 파일 여러 개 끌어 넣기, 진행 표시, 미리보기, 결과 파일·폴더 열기
+- [x] GUI 앱: 파일 여러 개 끌어 넣기, 진행 표시, 미리보기, 결과 파일·폴더 열기
 - [ ] macOS `.app`, Windows `.exe` 빌드 (GitHub Actions)
 - [ ] PNG 레퍼런스 방식: 캐릭터 설정화를 보고 부위를 판단 (Claude API, 선택 기능)
 

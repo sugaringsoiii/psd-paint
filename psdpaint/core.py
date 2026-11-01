@@ -34,6 +34,7 @@ class Result:
     regions: int
     hinted: int
     unhinted_large: int
+    preview: Image.Image = None  # 선화 + 밑색 축소 이미지
 
 
 class PaintError(Exception):
@@ -199,6 +200,14 @@ def write(psd, line_group, cls, keys, names_top_down, opts, out_path):
     return list(reversed(written))
 
 
+def make_preview(cls, boundary, keys, width=480):
+    lut = np.array([(255, 255, 255)] + [rgb for _, rgb in keys], np.uint8)
+    rgb = lut[cls]
+    rgb[boundary] = 0
+    im = Image.fromarray(rgb)
+    return im.resize((width, max(1, round(im.height * width / im.width))), Image.LANCZOS)
+
+
 def paint(psd_path, out_path, opts=None, progress=None):
     """psd_path에 힌트대로 밑색을 넣어 out_path로 저장한다. progress(단계 설명, 0~1)를 부른다."""
     opts = opts or Options()
@@ -215,5 +224,6 @@ def paint(psd_path, out_path, opts=None, progress=None):
     cls = fill(labels, boundary, region_key, keys, opts)
     say("PSD 저장 중", 0.85)
     layers = write(psd, line_group, cls, keys, names, opts, out_path)
+    preview = make_preview(cls, boundary, keys)
     say("완료", 1.0)
-    return Result(Path(out_path), layers, n, hinted, unhinted_large)
+    return Result(Path(out_path), layers, n, hinted, unhinted_large, preview)
