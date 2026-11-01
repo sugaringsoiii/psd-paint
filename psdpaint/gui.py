@@ -509,7 +509,7 @@ class MainWindow(QMainWindow):
             b.setObjectName("ghost")
             b.setFixedWidth(30)
         self.zoom_fit_btn.setObjectName("ghost")
-        self.zoom_out_btn.clicked.connect(lambda: self.set_zoom(self.zoom / 1.25))
+        self.zoom_out_btn.clicked.connect(lambda: self.set_zoom(self.zoom / 1.25))  # 가운데 기준
         self.zoom_in_btn.clicked.connect(lambda: self.set_zoom(self.zoom * 1.25))
         self.zoom_fit_btn.clicked.connect(lambda: self.set_zoom(1.0))
         zoom_row = QHBoxLayout()
@@ -1146,10 +1146,11 @@ class MainWindow(QMainWindow):
 
     def end_fast_zoom(self):
         self.preview.fast = False
+        self._anchor_img = None  # 핀치가 끝나면 다음 확대는 새 지점을 잡는다
         self.preview.update()
 
     def set_zoom(self, zoom, anchor=None):
-        """배율을 바꾼다. anchor(뷰포트 좌표)가 있으면 그 점이 제자리에 있게 스크롤을 맞춘다."""
+        """배율을 바꾼다. anchor(뷰포트 좌표)가 있으면 그 아래의 그림 지점이 제자리에 남게 스크롤을 맞춘다."""
         zoom = min(8.0, max(0.25, zoom))  # 폭 맞춤보다 작게도 볼 수 있다 (긴 웹툰 전체 보기)
         if self.preview_pix is None or abs(zoom - self.zoom) < 1e-6:
             self.zoom = zoom
@@ -1158,13 +1159,37 @@ class MainWindow(QMainWindow):
         h, v = self.scroll.horizontalScrollBar(), self.scroll.verticalScrollBar()
         vp = self.scroll.viewport()
         ax, ay = (anchor.x(), anchor.y()) if anchor is not None else (vp.width() / 2, vp.height() / 2)
-        fx = (h.value() + ax) / max(1, self.preview.width())
-        fy = (v.value() + ay) / max(1, self.preview.height())
+        # 기준점 아래의 그림 지점(그림 크기에 대한 비율). 한 번의 핀치 동안은 처음 잡은 지점을 그대로 써서
+        # 단계마다 반올림 오차가 쌓이지 않게 한다
+        held = getattr(self, "_anchor_img", None)
+        if held and abs(held[0] - ax) < 4 and abs(held[1] - ay) < 4:
+            fx, fy = held[2], held[3]
+        else:
+            r = self.preview.image_rect()
+            fx = (h.value() + ax - r.x()) / max(1, r.width())
+            fy = (v.value() + ay - r.y()) / max(1, r.height())
+            self._anchor_img = (ax, ay, fx, fy)
         self.zoom = zoom
         self.fit_preview()
-        QApplication.processEvents()
-        h.setValue(round(fx * self.preview.width() - ax))
-        v.setValue(round(fy * self.preview.height() - ay))
+        # 스크롤 범위를 바로 갱신한다 (나중에 갱신되면 위치가 잘려 화면이 튄다)
+        w, hh = self.preview.disp.width(), self.preview.disp.height()
+        self.preview.resize(max(vp.width(), w), max(vp.height(), hh))
+        r = self.preview.image_rect()
+        h.setValue(round(r.x() + fx * r.width() - ax))
+        v.setValue(round(r.y() + fy * r.height() - ay))
+
+    def queue_zoom(self, factor, anchor):
+        """핀치처럼 잦은 확대 요청을 모아 한 프레임에 한 번만 적용한다."""
+        self._zoom_factor = getattr(self, "_zoom_factor", 1.0) * factor
+        self._zoom_anchor = anchor
+        if not getattr(self, "_zoom_pending", False):
+            self._zoom_pending = True
+            QTimer.singleShot(0, self.flush_zoom)
+
+    def flush_zoom(self):
+        self._zoom_pending = False
+        factor, self._zoom_factor = self._zoom_factor, 1.0
+        self.set_zoom(self.zoom * factor, self._zoom_anchor)
 
     def typing(self):
         """글자를 입력하는 칸에 포커스가 있으면 단축키·스페이스 이동을 쓰지 않는다."""
@@ -1209,14 +1234,15 @@ class MainWindow(QMainWindow):
             if t == QEvent.Wheel and e.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):
                 step = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
                 pos = self.scroll.viewport().mapFromGlobal(e.globalPosition().toPoint())
-                self.set_zoom(self.zoom * step, pos)
+                self.sharpen.start()  # 연속 스크롤도 한 동작으로 보고 기준점을 유지한다
+                self.queue_zoom(step, pos)
                 return True
             # 트랙패드 핀치 확대·축소 (macOS)
             if t == QEvent.NativeGesture and e.gestureType() == Qt.ZoomNativeGesture:
                 pos = self.scroll.viewport().mapFromGlobal(e.globalPosition().toPoint())
                 self.preview.fast = True  # 핀치 중에는 빠르게, 멈추면 다시 부드럽게
                 self.sharpen.start()
-                self.set_zoom(self.zoom * (1 + e.value()), pos)
+                self.queue_zoom(1 + e.value(), pos)
                 return True
         return super().eventFilter(obj, e)
 
