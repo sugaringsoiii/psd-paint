@@ -34,14 +34,46 @@ REF_ROLE = Qt.UserRole + 1  # 파일별 레퍼런스 경로 (없으면 설정 �
 LABEL_W = 96  # 설정 탭 라벨 고정폭
 
 
-def open_path(path, reveal=False):
-    """파일을 연결된 앱으로 연다. reveal이면 파일 탐색기(Finder)에서 위치를 보여 준다."""
+def find_apps():
+    """설치된 PSD 편집 앱. → {"clip": 경로 또는 None, "photoshop": 경로 또는 None}"""
+    found = {"clip": None, "photoshop": None}
+    if sys.platform == "darwin":
+        def spotlight(name):
+            q = f"kMDItemContentType == 'com.apple.application-bundle' && kMDItemDisplayName == '*{name}*'c"
+            try:
+                out = subprocess.run(["mdfind", q], capture_output=True, text=True, timeout=5).stdout
+            except (OSError, subprocess.TimeoutExpired):
+                return []
+            return [p for p in out.splitlines() if p.endswith(".app")]
+        clip = [p for p in spotlight("CLIP STUDIO PAINT")]
+        ps = sorted((p for p in spotlight("Photoshop") if "Beta" not in p), reverse=True)  # 최신판 우선
+        found["clip"] = clip[0] if clip else None
+        found["photoshop"] = ps[0] if ps else None
+    elif sys.platform == "win32":
+        import glob
+        roots = [os.environ.get("ProgramFiles", r"C:\Program Files"), os.environ.get("ProgramFiles(x86)", "")]
+        for root in filter(None, roots):
+            clip = glob.glob(os.path.join(root, "CELSYS", "CLIP STUDIO*", "CLIP STUDIO PAINT", "CLIPStudioPaint.exe"))
+            ps = sorted(glob.glob(os.path.join(root, "Adobe", "Adobe Photoshop*", "Photoshop.exe")), reverse=True)
+            found["clip"] = found["clip"] or (clip[0] if clip else None)
+            found["photoshop"] = found["photoshop"] or (ps[0] if ps else None)
+    return found
+
+
+def open_path(path, reveal=False, app=None):
+    """파일을 연다. app(앱 경로)이 있으면 그 앱으로, 없으면 연결된 기본 앱으로.
+    reveal이면 파일 탐색기(Finder)에서 위치를 보여 준다."""
     path = str(path)
     if sys.platform == "darwin":
-        subprocess.Popen(["open", "-R", path] if reveal else ["open", path])
+        if reveal:
+            subprocess.Popen(["open", "-R", path])
+        else:
+            subprocess.Popen(["open", "-a", app, path] if app else ["open", path])
     elif sys.platform == "win32":
         if reveal:
             subprocess.Popen(["explorer", "/select,", path])
+        elif app:
+            subprocess.Popen([app, path])
         else:
             os.startfile(path)  # noqa: S606
     else:
@@ -573,6 +605,22 @@ class MainWindow(QMainWindow):
         add("결과 폴더", hbox(self.out_dir, browse))
         add("파일 이름 뒤", self.suffix)
 
+        # [파일 열기]에 쓸 앱. 자동이면 클립스튜디오 → 포토샵 → 기본 앱 순서로 설치된 것을 쓴다
+        self.apps = find_apps()
+        self.open_app = QComboBox()
+        for text, key, ok in (("자동 (클립스튜디오 → 포토샵 → 기본 앱)", "auto", True),
+                              ("클립스튜디오" + ("" if self.apps["clip"] else " (설치 안 됨)"), "clip", bool(self.apps["clip"])),
+                              ("포토샵" + ("" if self.apps["photoshop"] else " (설치 안 됨)"), "photoshop",
+                               bool(self.apps["photoshop"])),
+                              ("기본 앱 (macOS·Windows 연결 앱)", "default", True)):
+            self.open_app.addItem(text, key)
+            if not ok:
+                self.open_app.model().item(self.open_app.count() - 1).setEnabled(False)
+        self.open_app.setCurrentIndex(max(0, self.open_app.findData(s.value("open_app", "auto"))))
+        self.open_app.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.open_app.setMinimumContentsLength(8)
+        add("열 앱", self.open_app)
+
         # 레이어 이름
         self.line_group = QLineEdit(s.value("line_group", d.line_group))
         self.hint_group = QLineEdit(s.value("hint_group", d.hint_group))
@@ -664,6 +712,7 @@ class MainWindow(QMainWindow):
         s.setValue("use_out_dir", self.other_dir.isChecked())
         s.setValue("out_dir", self.out_dir.text())
         s.setValue("suffix", self.suffix.text())
+        s.setValue("open_app", self.open_app.currentData())
         s.setValue("line_group", self.line_group.text())
         s.setValue("hint_group", self.hint_group.text())
         s.setValue("boundary", self.boundary.text())
@@ -845,7 +894,7 @@ class MainWindow(QMainWindow):
             for i in items:
                 self.set_item_ref(i, None)
         elif chosen is open_res:
-            open_path(self.results[rows[0]].out_path)
+            open_path(self.results[rows[0]].out_path, app=self.app_for_open())
         elif chosen is remove:
             self.remove_selected()
 
@@ -1231,11 +1280,19 @@ class MainWindow(QMainWindow):
         if self.current_row() == row:
             self.show_selected(self.files.topLevelItem(row))
 
+    def app_for_open(self):
+        choice = self.open_app.currentData()
+        if choice == "auto":
+            return self.apps["clip"] or self.apps["photoshop"]
+        if choice in ("clip", "photoshop"):
+            return self.apps[choice]
+        return None
+
     def open_result(self, reveal):
         item = self.files.currentItem()
         result = self.results.get(self.files.indexOfTopLevelItem(item)) if item else None
         if result:
-            open_path(result.out_path, reveal=reveal)
+            open_path(result.out_path, reveal=reveal, app=self.app_for_open())
 
     def closeEvent(self, e):
         self.save_settings()
