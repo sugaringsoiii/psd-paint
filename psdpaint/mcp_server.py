@@ -29,7 +29,9 @@ server = MCPServer(
 )
 
 
-def _png(im):
+def _png(im, width=480):
+    if im.width > width:  # 대화에 넣는 미리보기는 작게
+        im = im.resize((width, round(im.height * width / im.width)))
     buf = io.BytesIO()
     im.convert("RGB").save(buf, "PNG", optimize=True)
     return Image(data=buf.getvalue(), format="png")

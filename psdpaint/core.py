@@ -499,7 +499,10 @@ def write(psd, line_group, cls, keys, names_top_down, opts, out_path):
     return list(reversed(written))
 
 
-def make_preview(cls, boundary, keys, width=480):
+PREVIEW_WIDTH = 1200  # 앱에서 확대해도 흐려지지 않을 만큼
+
+
+def make_preview(cls, boundary, keys, width=PREVIEW_WIDTH):
     lut = np.array([(255, 255, 255)] + [rgb for _, rgb in keys], np.uint8)
     rgb = lut[cls]
     rgb[boundary] = 0
@@ -636,7 +639,7 @@ def next_options(opts, result):
     return replace(opts, hint_source="psd", hint_path=str(result.out_path))
 
 
-def quick_preview(state, width=480):
+def quick_preview(state, width=PREVIEW_WIDTH):
     """선 아래 넓히기 없이 영역 색만 칠한 미리보기 (클릭 수정 중 바로 보여 줄 때). 선이 틈을 가린다."""
     lut = np.array([(255, 255, 255)] + [rgb for _, rgb in state["keys"]], np.uint8)
     rgb = lut[(state["region_key"] + 1)[state["labels"]]]

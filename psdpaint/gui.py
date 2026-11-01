@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 from PIL.ImageQt import ImageQt
-from PySide6.QtCore import QObject, QRectF, QSettings, Qt, QThread, Signal
+from PySide6.QtCore import QEvent, QObject, QRectF, QSettings, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QCursor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout,
@@ -308,8 +308,30 @@ class MainWindow(QMainWindow):
         self.scroll = QScrollArea()
         self.scroll.setObjectName("preview")
         self.scroll.setWidgetResizable(True)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.scroll.setWidget(self.preview)
+        self.scroll.viewport().installEventFilter(self)  # ⌘(Ctrl)+스크롤 확대·축소
+
+        # 확대·축소: 배율은 '폭 맞춤'에 대한 비율이다
+        self.zoom = 1.0
+        self.zoom_out_btn = QPushButton("−")
+        self.zoom_in_btn = QPushButton("+")
+        self.zoom_fit_btn = QPushButton("맞춤")
+        self.zoom_label = label("100%", "summary")
+        self.zoom_label.setFixedWidth(44)
+        self.zoom_label.setAlignment(Qt.AlignCenter)
+        for b in (self.zoom_out_btn, self.zoom_in_btn):
+            b.setObjectName("ghost")
+            b.setFixedWidth(30)
+        self.zoom_fit_btn.setObjectName("ghost")
+        self.zoom_out_btn.clicked.connect(lambda: self.set_zoom(self.zoom / 1.25))
+        self.zoom_in_btn.clicked.connect(lambda: self.set_zoom(self.zoom * 1.25))
+        self.zoom_fit_btn.clicked.connect(lambda: self.set_zoom(1.0))
+        zoom_row = QHBoxLayout()
+        zoom_row.setContentsMargins(0, 0, 0, 0)
+        zoom_row.addStretch()
+        for wdg in (self.zoom_out_btn, self.zoom_label, self.zoom_in_btn, self.zoom_fit_btn):
+            zoom_row.addWidget(wdg)
         self.open_btn = QPushButton("파일 열기")
         self.open_btn.clicked.connect(lambda: self.open_result(reveal=False))
         self.reveal_btn = QPushButton("폴더에서 보기")
@@ -342,6 +364,7 @@ class MainWindow(QMainWindow):
         pv = QWidget()
         pl = QVBoxLayout(pv)
         pl.setContentsMargins(0, 8, 0, 0)
+        pl.addLayout(zoom_row)
         pl.addWidget(self.scroll, 1)
         pl.addWidget(self.edit_bar)
         pl.addWidget(self.preview_info)
@@ -906,6 +929,8 @@ class MainWindow(QMainWindow):
             return
         self._qimage = ImageQt(result.preview.convert("RGB"))  # QImage가 쓰는 동안 버퍼를 살려 둔다
         self.preview_pix = QPixmap.fromImage(self._qimage)
+        if _prev is not None:  # 다른 파일을 고르면 폭 맞춤으로 돌아간다
+            self.zoom = 1.0
         self.preview.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.preview_info.setText(self.describe(result))
         self.fit_preview()
@@ -913,9 +938,39 @@ class MainWindow(QMainWindow):
 
     def fit_preview(self):
         if self.preview_pix is None:
+            self.preview.setMinimumSize(0, 0)
             return
-        w = max(50, self.scroll.viewport().width() - 4)
-        self.preview.setPixmap(self.preview_pix.scaledToWidth(w, Qt.SmoothTransformation))
+        w = max(50, round((self.scroll.viewport().width() - 4) * self.zoom))
+        pm = self.preview_pix.scaledToWidth(w, Qt.SmoothTransformation)
+        self.preview.setPixmap(pm)
+        self.preview.setMinimumSize(pm.size())  # 확대하면 스크롤 영역이 그만큼 커진다
+        self.zoom_label.setText(f"{round(self.zoom * 100)}%")
+
+    def set_zoom(self, zoom, anchor=None):
+        """배율을 바꾼다. anchor(뷰포트 좌표)가 있으면 그 점이 제자리에 있게 스크롤을 맞춘다."""
+        zoom = min(8.0, max(0.25, zoom))  # 폭 맞춤보다 작게도 볼 수 있다 (긴 웹툰 전체 보기)
+        if self.preview_pix is None or abs(zoom - self.zoom) < 1e-6:
+            self.zoom = zoom
+            self.zoom_label.setText(f"{round(self.zoom * 100)}%")
+            return
+        h, v = self.scroll.horizontalScrollBar(), self.scroll.verticalScrollBar()
+        vp = self.scroll.viewport()
+        ax, ay = (anchor.x(), anchor.y()) if anchor is not None else (vp.width() / 2, vp.height() / 2)
+        fx = (h.value() + ax) / max(1, self.preview.width())
+        fy = (v.value() + ay) / max(1, self.preview.height())
+        self.zoom = zoom
+        self.fit_preview()
+        QApplication.processEvents()
+        h.setValue(round(fx * self.preview.width() - ax))
+        v.setValue(round(fy * self.preview.height() - ay))
+
+    def eventFilter(self, obj, e):
+        if obj is self.scroll.viewport() and e.type() == QEvent.Wheel and \
+                e.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):
+            step = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
+            self.set_zoom(self.zoom * step, e.position())
+            return True
+        return super().eventFilter(obj, e)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
