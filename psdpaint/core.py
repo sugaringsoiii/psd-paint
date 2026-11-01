@@ -23,6 +23,7 @@ class Options:
     ai_model: str = "claude-opus-5-5"
     ai_key: str = ""                    # 실행할 때만 넘긴다. 설정 파일에 저장하지 않는다
     ai_review: bool = True              # 칠한 결과를 AI가 한 번 더 보고 틀린 곳을 고친다 (요청 1회 추가)
+    ai_zoom: bool = True                # 인물마다 크게 잘라 부위 나누기를 다시 검토한다 (요청 1회 추가)
     extra_boundary: list = field(default_factory=lambda: ["컷*", "*테두리*"])  # 경계로 쓸 픽셀 레이어 이름 패턴
     output_group: str = "밑색"
     gap_close_px: int = 2       # 선을 이만큼 두껍게 해서 작은 틈을 막는다
@@ -530,21 +531,25 @@ def ai_match(mismatch, labels, n, boundary, frame, opts, out_path, say):
             match.save_job(job, folder)
             raise AwaitingAnswer(f"AI 매칭 요청을 만들었습니다: {folder}. "
                              "Claude Code·Codex에서 이 폴더의 README.md대로 answer.json을 만든 뒤 다시 실행하세요")
-        answer = json.loads(answer_file.read_text())
+        answer = match.structured_to_assignments(job, json.loads(answer_file.read_text()))
     else:
         if not opts.ai_key:
             raise PaintError("AI 매칭에 쓸 API 키가 없습니다. 설정의 AI 연결에 키를 넣으세요")
         say(f"AI 매칭 중 (영역 {len(cand)}개)", 0.4)
         try:
-            answer = match.ask(job, opts.ai_provider, opts.ai_key, opts.ai_model)
-            usage = dict(job.usage, calls=1)
+            # 장면 이해(인물·부위) → 인물별 확대 검토 → 인물×부위 색을 차례로 묻는다
+            raw = match.ask_structured(job, opts.ai_provider, opts.ai_key, opts.ai_model, zoom=opts.ai_zoom,
+                                       say=lambda msg: say(msg, 0.45))
+            usage = dict(job.usage)
+            answer = match.structured_to_assignments(job, raw)
             if opts.ai_review:
                 # 칠한 결과를 다시 보여 주고 틀린 번호만 고치게 한다 (요청 1회 추가)
                 say("AI 검수 중", 0.5)
                 rjob = match.review_job(job, labels, boundary, answer)
                 answer = match.merge_review(answer, match.ask(rjob, opts.ai_provider, opts.ai_key, opts.ai_model))
                 usage = {"model": usage["model"], "input": usage["input"] + rjob.usage["input"],
-                         "output": usage["output"] + rjob.usage["output"], "calls": 2, "fixed": answer["fixed"]}
+                         "output": usage["output"] + rjob.usage["output"], "calls": usage["calls"] + 1,
+                         "fixed": answer["fixed"]}
             job.usage = usage
         except (RuntimeError, ValueError) as e:
             raise PaintError(f"AI 매칭 실패: {e}") from None

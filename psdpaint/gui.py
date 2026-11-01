@@ -470,6 +470,9 @@ class MainWindow(QMainWindow):
         self.ai_review = QCheckBox("칠한 결과를 한 번 더 보고 고치기 (요청 1회 추가)")
         self.ai_review.setChecked(s.value("ai_review", True, bool))
         add("검수", self.ai_review)
+        self.ai_zoom = QCheckBox("인물마다 크게 잘라 부위를 다시 검토 (요청 1회 추가)")
+        self.ai_zoom.setChecked(s.value("ai_zoom", True, bool))
+        add("인물 확대", self.ai_zoom)
         add("제공자", self.provider)
         add("모델", hbox(self.model, self.list_btn))
         add("API 키", hbox(self.api_key, self.test_btn))
@@ -507,6 +510,7 @@ class MainWindow(QMainWindow):
         s.setValue("provider", pid)
         s.setValue("ai_mode", self.ai_mode.currentData())
         s.setValue("ai_review", self.ai_review.isChecked())
+        s.setValue("ai_zoom", self.ai_zoom.isChecked())
         s.setValue(f"model_{pid}", self.model.currentText())
         self.save_api_key()
 
@@ -523,6 +527,7 @@ class MainWindow(QMainWindow):
             ai_model=self.model.currentText().strip() or ai.PROVIDERS[self.provider.currentData()]["model"],
             ai_key=self.api_key.text().strip(),
             ai_review=self.ai_review.isChecked(),
+            ai_zoom=self.ai_zoom.isChecked(),
             extra_boundary=patterns(self.boundary),
             background=patterns(self.background),
             hide_background=self.hide_bg.isChecked(),

@@ -2,7 +2,8 @@
 
 1. 원고에서 칠할 영역에 번호를 붙인 지도 이미지를 만든다.
 2. 레퍼런스에서 색(팔레트)을 뽑고 P1, P2 … 표시를 얹은 이미지를 만든다.
-3. 두 이미지를 AI에 보여 주고 영역 번호마다 팔레트를 고르게 한다.
+3. AI가 장면을 이해해 인물마다 부위(머리카락·피부·겉옷 …)를 나누고, 인물×부위마다 팔레트를 고른다.
+   같은 인물의 같은 부위는 코드가 같은 색으로 칠한다.
    - Claude API로 바로 묻거나,
    - 같은 내용을 폴더로 내보내 Claude Code·Codex 같은 도구에서 답(answer.json)을 받아 다시 적용한다.
 """
@@ -25,28 +26,6 @@ MARGIN = 30          # 조각을 내용에 맞춰 자를 때 남기는 여백
 REF_WIDTH = 900      # 레퍼런스 이미지 폭
 LABELS_PER_COLOR = 3  # 팔레트 색마다 표시를 얹을 덩어리 수
 
-PROMPT = """웹툰 밑색 작업이다. 이미지 두 묶음을 준다.
-
-[레퍼런스] 같은 작품의 다른 페이지를 칠해 둔 그림이다. 칠한 색마다 P1, P2 … 표시를 얹었다.
-[원고 지도] 지금 칠할 페이지의 선화다. 칠할 영역마다 옅은 색과 숫자를 얹었다.
-
-할 일: 원고 지도의 숫자 영역마다, 레퍼런스에서 같은 인물의 같은 부위에 쓰인 팔레트(P번호)를 고른다.
-
-먼저 analysis에 짧게 적는다.
-1. 레퍼런스 인물마다: 알아볼 특징(머리모양·머리띠·옷차림)과 부위별 팔레트 (예: 고양이 머리띠 소년 = 머리 P2, 머리띠 P5, 재킷 P3, 피부 P6)
-2. 원고 지도 인물마다: 어느 레퍼런스 인물인지와 그 근거, 그리고 그 인물에 속한 번호들
-그다음 assignments에 번호마다 팔레트를 적는다. analysis에 적은 대응과 어긋나지 않게 한다.
-- 머리모양·액세서리·옷차림으로 같은 인물을 알아본다. 같은 인물이면 페이지가 달라도 같은 색을 쓴다.
-- 피부(얼굴·목·손), 머리카락, 옷(재킷·셔츠·넥타이·치마·바지 등), 소품을 구분한다.
-- 피부(얼굴·목·귀·손·팔·다리)는 레퍼런스에 없는 인물(엑스트라)이어도 반드시 피부 팔레트를 고른다. 피부를 none으로 두면 회색으로 칠해진다.
-- 레퍼런스에 없는 인물의 머리카락·옷·사물이거나 판단이 서지 않으면 "none"을 고른다. 억지로 고르지 않는다.
-- 배경(하늘·벽·바닥 등)은 "none"이다.
-- 지도에서 바탕색이 같은 번호들은 선이 끊긴 틈으로 이어진 한 덩어리다 (옷 주름선 등으로 나뉜 같은 옷·같은 머리일 가능성이 크다). 특별한 이유가 없으면 같은 팔레트를 고른다. 단, 머리카락과 얼굴처럼 묶음 안에서도 부위가 분명히 다르면 따로 고른다.
-- 지도의 모든 숫자에 대해 하나씩 답한다.
-{palette_note}
-팔레트: {palette_list}
-영역 번호: 1 ~ {count}"""
-
 REVIEW_PROMPT = """웹툰 밑색 검수다. 이미지 두 묶음을 준다.
 
 [레퍼런스] 같은 작품의 다른 페이지를 칠해 둔 그림이다. 칠한 색마다 P1, P2 … 표시를 얹었다.
@@ -62,9 +41,6 @@ REVIEW_PROMPT = """웹툰 밑색 검수다. 이미지 두 묶음을 준다.
 팔레트: {palette_list}
 영역 번호: 1 ~ {count}"""
 
-NAME_NOTE = """- layer_names에는 팔레트마다 밑색 레이어 이름을 짧은 한국어로 붙인다 (예: 머리, 피부, 재킷, 셔츠, 넥타이, 치마, 바지, 신발, 소품). 같은 부위면 인물이 달라도 같은 이름을 쓴다."""
-
-
 @dataclass
 class Job:
     candidates: np.ndarray            # 지도 번호 k(1부터) → 원고 영역 번호
@@ -77,6 +53,9 @@ class Job:
     palette_text: str = ""
     groups: np.ndarray = None   # 지도 번호 순서의 묶음 id (선이 끊겨 이어진 영역끼리 같다)
     areas: np.ndarray = None    # 지도 번호 순서의 영역 넓이
+    map_label: str = "[원고 지도]"  # map_images 앞에 붙이는 이름표 (단계마다 다르다)
+    full_map: Image.Image = None  # 번호를 얹은 전체 원고 지도
+    kmap: np.ndarray = None       # 픽셀 → 지도 번호
 
 
 def _font(size):
@@ -155,6 +134,7 @@ def build_map(labels, boundary, cand_ids, colors=None, groups=None):
             continue
         x0, x1 = max(0, int(cols.min()) - MARGIN), min(w, int(cols.max()) + 1 + MARGIN)
         images.append(img.crop((x0, y0, x1, y1)))
+    build_map.last = (img, kmap)  # 인물별 확대에 쓰는 전체 지도와 번호 맵
     return images, np.r_[0, cand_ids]
 
 
@@ -237,28 +217,15 @@ def make_job(labels, boundary, cand_ids, ref_rgb, palette, masks):
     map_images, cands = build_map(labels, boundary, cand_ids, groups=groups)
     ref_images = build_reference(ref_rgb, masks, palette)
     ids = [p["id"] for p in palette]
-    named = all(p["name"] for p in palette)
     palette_list = ", ".join(f"{p['id']}=#{p['rgb'][0]:02X}{p['rgb'][1]:02X}{p['rgb'][2]:02X}"
                              + (f"({p['name'] or p.get('note')})" if p["name"] or p.get("note") else "")
                              for p in palette)
-    prompt = PROMPT.format(palette_note="" if named else NAME_NOTE, palette_list=palette_list, count=len(cand_ids))
-    props = {
-        # 번호를 고르기 전에 인물 대응을 먼저 적게 해 인물을 헷갈리는 실수를 줄인다 (답은 이 순서로 나온다)
-        "analysis": {"type": "string"},
-        "assignments": {"type": "array", "items": {
-            "type": "object",
-            "properties": {"region": {"type": "integer"}, "palette": {"type": "string", "enum": ids + ["none"]}},
-            "required": ["region", "palette"], "additionalProperties": False}},
-    }
-    if not named:
-        props["layer_names"] = {"type": "array", "items": {
-            "type": "object",
-            "properties": {"palette": {"type": "string", "enum": ids}, "layer": {"type": "string"}},
-            "required": ["palette", "layer"], "additionalProperties": False}}
-    schema = {"type": "object", "properties": props, "required": list(props), "additionalProperties": False}
     areas = np.bincount(labels.ravel(), minlength=labels.max() + 1)[cand_ids]
+    full_map, kmap = build_map.last
+    prompt = FULL_PROMPT.format(parts=", ".join(PARTS), palette_list=palette_list, count=len(cand_ids))
+    schema = full_schema(ids)
     return Job(cands, palette, ref_images, map_images, prompt, schema, palette_text=palette_list,
-               groups=groups, areas=areas)
+               groups=groups, areas=areas, full_map=full_map, kmap=kmap)
 
 
 def _b64(img):
@@ -271,10 +238,10 @@ def ask_claude(job, api_key, model):
     """Claude API로 영역마다 팔레트를 고른다. → 답 dict. 토큰 사용량은 job.usage에 남긴다."""
     import anthropic
 
-    content = [{"type": "text", "text": "[레퍼런스]"}]
+    content = [{"type": "text", "text": "[레퍼런스]"}] if job.ref_images else []
     content += [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _b64(im)}}
                 for im in job.ref_images]
-    content.append({"type": "text", "text": "[원고 지도]"})
+    content.append({"type": "text", "text": job.map_label})
     content += [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _b64(im)}}
                 for im in job.map_images]
     content.append({"type": "text", "text": job.prompt})
@@ -332,9 +299,9 @@ def _openapi_schema(node):
 
 def ask_gemini(job, api_key, model):
     """Gemini API로 영역마다 팔레트를 고른다."""
-    parts = [{"text": "[레퍼런스]"}]
+    parts = [{"text": "[레퍼런스]"}] if job.ref_images else []
     parts += [{"inline_data": {"mime_type": "image/png", "data": _b64(im)}} for im in job.ref_images]
-    parts.append({"text": "[원고 지도]"})
+    parts.append({"text": job.map_label})
     parts += [{"inline_data": {"mime_type": "image/png", "data": _b64(im)}} for im in job.map_images]
     parts.append({"text": job.prompt})
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(model)}:generateContent"
@@ -365,9 +332,9 @@ def ask_gemini(job, api_key, model):
 
 def ask_openai(job, api_key, model):
     """OpenAI Responses API로 영역마다 팔레트를 고른다."""
-    content = [{"type": "input_text", "text": "[레퍼런스]"}]
+    content = [{"type": "input_text", "text": "[레퍼런스]"}] if job.ref_images else []
     content += [{"type": "input_image", "image_url": f"data:image/png;base64,{_b64(im)}"} for im in job.ref_images]
-    content.append({"type": "input_text", "text": "[원고 지도]"})
+    content.append({"type": "input_text", "text": job.map_label})
     content += [{"type": "input_image", "image_url": f"data:image/png;base64,{_b64(im)}"} for im in job.map_images]
     content.append({"type": "input_text", "text": job.prompt})
     body = {"model": model, "input": [{"role": "user", "content": content}],
@@ -403,9 +370,9 @@ def review_job(job, labels, boundary, answer):
     colors = np.array([pal.get(pick.get(k), NONE_TINT) for k in range(1, len(cand_ids) + 1)], np.uint8)
     maps, _ = build_map(labels, boundary, cand_ids, colors)
     prompt = REVIEW_PROMPT.format(palette_list=job.palette_text, count=len(cand_ids))
-    schema = {k: v for k, v in job.schema.items()}
-    schema["properties"] = {k: v for k, v in job.schema["properties"].items() if k != "layer_names"}
-    schema["required"] = list(schema["properties"])
+    ids = [p["id"] for p in job.palette]
+    schema = _obj({"analysis": {"type": "string"}, "assignments": {"type": "array", "items": _obj(
+        {"region": {"type": "integer"}, "palette": {"type": "string", "enum": ids + ["none"]}})}})
     return Job(job.candidates, job.palette, job.ref_images, maps, prompt, schema, palette_text=job.palette_text,
                groups=job.groups, areas=job.areas)
 
@@ -413,9 +380,16 @@ def review_job(job, labels, boundary, answer):
 def merge_review(answer, review):
     """검수에서 고친 번호만 덮어쓴다."""
     fixed = {item["region"]: item["palette"] for item in review.get("assignments", [])}
-    merged = [{"region": a["region"], "palette": fixed.pop(a["region"], a["palette"])}
-              for a in answer.get("assignments", [])]
-    merged += [{"region": k, "palette": v} for k, v in fixed.items()]
+    # 고친 번호의 레이어는 같은 팔레트를 쓰는 다른 번호의 레이어를 따른다
+    layer_of = {a["palette"]: a.get("layer") for a in answer.get("assignments", []) if a.get("layer")}
+    merged = []
+    for a in answer.get("assignments", []):
+        if a["region"] in fixed:
+            p = fixed.pop(a["region"])
+            merged.append({"region": a["region"], "palette": p, "layer": layer_of.get(p)})
+        else:
+            merged.append(a)
+    merged += [{"region": k, "palette": v, "layer": layer_of.get(v)} for k, v in fixed.items()]
     return {**answer, "assignments": merged, "review": review.get("analysis", ""), "fixed": len(review.get("assignments", []))}
 
 
@@ -445,6 +419,7 @@ def fill_group_gaps(job, answer, share=0.6):
     if job.groups is None:
         return answer
     pick = {item["region"]: item["palette"] for item in answer.get("assignments", [])}
+    layer = {item["region"]: item.get("layer") for item in answer.get("assignments", [])}
     k_all = np.arange(1, len(job.candidates))
     for g in np.unique(job.groups):
         members = k_all[job.groups == g]
@@ -459,10 +434,11 @@ def fill_group_gaps(job, answer, share=0.6):
             continue
         top, top_area = max(area.items(), key=lambda kv: kv[1])
         if top_area >= share * job.areas[members - 1].sum():
+            top_layer = next((layer.get(int(k)) for k in members if pick.get(int(k)) == top), None)
             for k in members:
                 if pick.get(int(k), "none") == "none":
-                    pick[int(k)] = top
-    return {**answer, "assignments": [{"region": k, "palette": p} for k, p in sorted(pick.items())]}
+                    pick[int(k)], layer[int(k)] = top, top_layer
+    return {**answer, "assignments": [{"region": k, "palette": p, "layer": layer.get(k)} for k, p in sorted(pick.items())]}
 
 
 def apply_answer(job, answer, n_regions):
@@ -471,14 +447,237 @@ def apply_answer(job, answer, n_regions):
     for item in answer.get("layer_names", []):
         if not names.get(item["palette"]):
             names[item["palette"]] = item["layer"].strip() or None
+    rgb_of = {p["id"]: p["rgb"] for p in job.palette}
     keys, key_of = [], {}
-    for p in job.palette:
-        rgb = p["rgb"]
-        key_of[p["id"]] = len(keys)
-        keys.append((names.get(p["id"]) or f"색_{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}", rgb))
     region_key = np.full(n_regions + 1, -1, np.int64)
     for item in answer.get("assignments", []):
         k, pid = item.get("region"), item.get("palette")
-        if pid in key_of and isinstance(k, int) and 1 <= k < len(job.candidates):
-            region_key[job.candidates[k]] = key_of[pid]
+        if pid not in rgb_of or not isinstance(k, int) or not 1 <= k < len(job.candidates):
+            continue
+        rgb = rgb_of[pid]
+        # 레이어 이름: 답에 적힌 부위 레이어 → 레퍼런스 레이어 이름 → 색 코드
+        layer = item.get("layer") or names.get(pid) or f"색_{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
+        if (layer, pid) not in key_of:
+            key_of[(layer, pid)] = len(keys)
+            keys.append((layer, rgb))
+        region_key[job.candidates[k]] = key_of[(layer, pid)]
     return region_key, keys
+
+
+
+# ---------------------------------------------------------------------------
+# 구조화 매칭: 장면 이해 → 인물×부위 색 → 번호별 색
+#
+# 번호마다 바로 색을 고르면 작은 조각에서 인물·부위를 헷갈린다. 먼저 인물마다 자세와 부위(머리카락·피부·겉옷 …)를
+# 나누게 하고, 색은 인물×부위마다 한 번만 고르게 한다. 같은 인물의 같은 부위는 코드가 같은 색으로 칠한다.
+# ---------------------------------------------------------------------------
+
+PARTS = ["머리카락", "피부", "겉옷", "상의", "셔츠", "넥타이·리본", "하의", "치마", "신발", "양말",
+         "머리띠·모자", "장신구·소품", "기타"]
+LAYER_OF_PART = {"머리카락": "머리", "넥타이·리본": "넥타이", "머리띠·모자": "머리띠", "장신구·소품": "소품"}
+
+SCENE_RULES = """장면을 이해하는 순서
+1. 인물을 하나씩 찾는다. 인물마다 자세(서 있음·앉음·고개 숙임·팔 위치 등)와 겉모습(머리모양·머리띠·옷차림)을 적는다.
+2. 자세를 바탕으로 인체 구조를 따라간다. 머리 → 얼굴·목 → 몸통 → 양팔(소매와 손) → 다리(하의와 신발) 순서로, 가려진 부분이 어디로 이어지는지 생각한다.
+3. 옷은 겹침 순서로 나눈다. 겉옷(재킷·가디건·코트) / 상의(스웨터·니트·티셔츠·조끼) / 셔츠(깃·소매 끝) / 넥타이·리본 / 하의 / 치마 / 신발 / 양말.
+   팔 전체가 겉옷 소매면 소매 조각은 모두 겉옷이다. 소매 끝으로 보이는 셔츠 조각만 셔츠다.
+4. 주름선이나 끊긴 선으로 나뉜 조각은 같은 옷이다. 지도에서 바탕색이 같은 번호들은 선이 끊긴 틈으로 이어진 한 덩어리다.
+5. 피부는 얼굴·목·귀·손·팔·다리처럼 맨살이 보이는 곳이다. 머리카락과 얼굴 경계를 특히 조심한다(앞머리 사이로 보이는 이마는 피부).
+6. 의자·컵·폰 같은 사물은 objects에, 하늘·벽·바닥 같은 배경은 background에 넣는다.
+7. 지도의 모든 번호를 빠짐없이 정확히 한 곳(인물의 부위, objects, background)에 넣는다."""
+
+COLOR_RULES = """색을 정하는 순서
+1. 레퍼런스 인물마다 알아볼 특징과 부위별 팔레트를 정리한다.
+2. 원고 인물마다 같은 레퍼런스 인물을 찾는다(머리모양·머리띠·옷차림). 찾으면 부위마다 그 인물의 팔레트를 쓴다.
+3. 레퍼런스에 없는 인물(엑스트라)은 피부만 피부 팔레트를 고르고, 나머지 부위는 none으로 둔다.
+4. 피부는 엑스트라도 반드시 피부 팔레트다."""
+
+FULL_PROMPT = """웹툰 밑색 작업이다. 이미지 두 묶음을 준다.
+
+[레퍼런스] 같은 작품의 다른 페이지를 칠해 둔 그림이다. 칠한 색마다 P1, P2 … 표시를 얹었다.
+[원고 지도] 지금 칠할 페이지의 선화다. 칠할 영역마다 옅은 바탕색과 숫자를 얹었다.
+
+""" + SCENE_RULES + """
+
+""" + COLOR_RULES + """
+
+답 형식
+- analysis: 레퍼런스 인물 정리와 원고 인물 대응을 짧게 적는다.
+- people: 원고 인물마다 id, description(겉모습), pose(자세), reference_character(대응하는 레퍼런스 인물 또는 "없음"),
+  parts(부위마다 part, regions(번호 목록), palette(P번호 또는 none)).
+- objects: 사물 이름과 번호 목록. background: 배경 번호 목록.
+부위 이름: {parts}
+팔레트: {palette_list}
+영역 번호: 1 ~ {count}"""
+
+SCENE_PROMPT = """웹툰 밑색 작업의 첫 단계다. [원고 지도]는 칠할 페이지의 선화이고, 칠할 영역마다 옅은 바탕색과 숫자를 얹었다.
+색은 아직 고르지 않는다. 장면의 인물과 부위만 나눈다.
+
+""" + SCENE_RULES + """
+
+답 형식: analysis(장면 요약), people(id, description, pose, parts[part, regions]), objects(name, regions), background(번호 목록)
+부위 이름: {parts}
+영역 번호: 1 ~ {count}"""
+
+ZOOM_PROMPT = """웹툰 밑색 작업의 확대 검토다. [인물 확대]는 인물마다 원고 지도를 크게 잘라 낸 그림이다(번호가 같다).
+아래는 앞 단계에서 나눈 인물별 부위다. 확대 그림을 보고 틀린 부분을 고쳐 인물마다 parts를 다시 적는다.
+- 자세와 인체 구조를 따라 부위가 맞는지 확인한다 (머리카락↔얼굴, 소매↔손, 겉옷↔안쪽 옷).
+- 그 인물이 아닌 번호(다른 인물·사물·배경)가 섞였으면 빼고, 빠진 번호가 있으면 넣는다.
+- 확대 그림에 없는 인물은 그대로 둔다.
+
+""" + SCENE_RULES + """
+
+앞 단계 결과:
+{scene}
+부위 이름: {parts}"""
+
+COLOR_PROMPT = """웹툰 밑색 작업의 색 정하기 단계다.
+[레퍼런스]는 같은 작품의 다른 페이지를 칠해 둔 그림이고, 칠한 색마다 P1, P2 … 표시를 얹었다.
+[원고 인물]은 지금 칠할 페이지의 인물을 하나씩 잘라 낸 그림이다(순서대로 {ids}).
+
+""" + COLOR_RULES + """
+
+원고 인물과 부위:
+{people}
+팔레트: {palette_list}
+답 형식: analysis, people(id, reference_character, colors[part, palette])"""
+
+
+def _int_list():
+    return {"type": "array", "items": {"type": "integer"}}
+
+
+def _obj(props):
+    return {"type": "object", "properties": props, "required": list(props), "additionalProperties": False}
+
+
+def scene_schema(with_palette_ids=None):
+    part = {"part": {"type": "string", "enum": PARTS}, "regions": _int_list()}
+    if with_palette_ids is not None:
+        part["palette"] = {"type": "string", "enum": with_palette_ids + ["none"]}
+    person = {"id": {"type": "string"}, "description": {"type": "string"}, "pose": {"type": "string"}}
+    if with_palette_ids is not None:
+        person["reference_character"] = {"type": "string"}
+    person["parts"] = {"type": "array", "items": _obj(part)}
+    return _obj({
+        "analysis": {"type": "string"},
+        "people": {"type": "array", "items": _obj(person)},
+        "objects": {"type": "array", "items": _obj({"name": {"type": "string"}, "regions": _int_list()})},
+        "background": _int_list(),
+    })
+
+
+def full_schema(palette_ids):
+    """한 번에 답하는 형식 (요청 폴더·MCP): 장면 이해와 부위별 팔레트를 함께 적는다."""
+    return scene_schema(palette_ids)
+
+
+def color_schema(palette_ids):
+    color = _obj({"part": {"type": "string", "enum": PARTS},
+                  "palette": {"type": "string", "enum": palette_ids + ["none"]}})
+    person = _obj({"id": {"type": "string"}, "reference_character": {"type": "string"},
+                   "colors": {"type": "array", "items": color}})
+    return _obj({"analysis": {"type": "string"}, "people": {"type": "array", "items": person}})
+
+
+def _scene_text(scene):
+    lines = []
+    for p in scene.get("people", []):
+        parts = "; ".join(f"{x['part']}: {', '.join(map(str, x['regions']))}" for x in p.get("parts", []))
+        lines.append(f"- 인물 {p['id']} ({p.get('description', '')}, {p.get('pose', '')}): {parts}")
+    for o in scene.get("objects", []):
+        lines.append(f"- 사물 {o['name']}: {', '.join(map(str, o['regions']))}")
+    if scene.get("background"):
+        lines.append(f"- 배경: {', '.join(map(str, scene['background']))}")
+    return "\n".join(lines)
+
+
+def person_crops(job, scene, max_side=1000):
+    """인물마다 원고 지도를 잘라 크게 만든다. → [(인물 id, 이미지)]"""
+    out = []
+    for p in scene.get("people", []):
+        ks = [k for part in p.get("parts", []) for k in part.get("regions", [])]
+        m = np.isin(job.kmap, ks) & (job.kmap > 0)
+        if not m.any():
+            continue
+        ys, xs = np.nonzero(m)
+        pad = 60
+        box = (max(0, xs.min() - pad), max(0, ys.min() - pad),
+               min(job.kmap.shape[1], xs.max() + pad), min(job.kmap.shape[0], ys.max() + pad))
+        im = job.full_map.crop(box)
+        scale = min(3.0, max_side / max(im.size))
+        if scale > 1.05 or scale < 0.95:
+            im = im.resize((round(im.width * scale), round(im.height * scale)), Image.LANCZOS)
+        out.append((p["id"], im))
+    return out
+
+
+def _sub(job, ref_images, map_images, prompt, schema, map_label="[원고 지도]"):
+    return Job(job.candidates, job.palette, ref_images, map_images, prompt, schema, palette_text=job.palette_text,
+               groups=job.groups, areas=job.areas, map_label=map_label, full_map=job.full_map, kmap=job.kmap)
+
+
+def ask_structured(job, provider, api_key, model, zoom=True, say=None):
+    """API로 장면 이해 → (인물별 확대 보정) → 색 정하기를 차례로 묻는다. → 한 번에 답하는 형식의 답"""
+    say = say or (lambda msg: None)
+    total = {"input": 0, "output": 0, "calls": 0, "model": model}
+
+    def run(sub):
+        result = ask(sub, provider, api_key, model)
+        for key in ("input", "output"):
+            total[key] += sub.usage.get(key, 0)
+        total["model"] = sub.usage.get("model", model)
+        total["calls"] += 1
+        return result
+
+    count = len(job.candidates) - 1
+    say("AI 장면 이해 중")
+    scene = run(_sub(job, [], job.map_images, SCENE_PROMPT.format(parts=", ".join(PARTS), count=count),
+                     scene_schema()))
+    crops = person_crops(job, scene)
+    if zoom and crops:
+        say("AI 인물별 확대 검토 중")
+        z = run(_sub(job, [], [im for _, im in crops],
+                     ZOOM_PROMPT.format(scene=_scene_text(scene), parts=", ".join(PARTS)), scene_schema(),
+                     "[인물 확대]"))
+        fixed = {p["id"]: p for p in z.get("people", [])}
+        scene["people"] = [fixed.get(p["id"], p) for p in scene.get("people", [])]
+        crops = person_crops(job, scene)
+    say("AI 색 정하는 중")
+    ids = [p["id"] for p in job.palette]
+    colors = run(_sub(job, job.ref_images, [im for _, im in crops],
+                      COLOR_PROMPT.format(ids=", ".join(i for i, _ in crops), people=_scene_text(scene),
+                                          palette_list=job.palette_text), color_schema(ids), "[원고 인물]"))
+    pick = {(c["id"], x["part"]): x["palette"] for c in colors.get("people", []) for x in c.get("colors", [])}
+    ref_of = {c["id"]: c.get("reference_character", "") for c in colors.get("people", [])}
+    for p in scene.get("people", []):
+        p["reference_character"] = ref_of.get(p["id"], "")
+        for part in p.get("parts", []):
+            part["palette"] = pick.get((p["id"], part["part"]), "none")
+    scene["analysis"] = f"{scene.get('analysis', '')}\n\n[색] {colors.get('analysis', '')}".strip()
+    job.usage = total
+    return scene
+
+
+def structured_to_assignments(job, answer):
+    """한 번에 답하는 형식 → 번호별 (팔레트, 레이어 이름). 이미 assignments 형식이면 그대로 쓴다."""
+    if "people" not in answer:
+        return answer
+    skin = next((p["id"] for p in job.palette if p.get("name") == "피부"), None) or \
+        next((p["id"] for p in job.palette if min(p["rgb"]) >= 248), None)
+    name_of = {p["id"]: p.get("name") for p in job.palette}
+    out = {}
+    for person in answer.get("people", []):
+        for part in person.get("parts", []):
+            pid = part.get("palette", "none")
+            if part["part"] == "피부" and pid == "none" and skin:
+                pid = skin
+            layer = name_of.get(pid) or LAYER_OF_PART.get(part["part"], part["part"])
+            for k in part.get("regions", []):
+                out[int(k)] = {"region": int(k), "palette": pid, "layer": layer}
+    # 결과를 보고 고친 번호 (MCP·요청 폴더에서 덧붙인 수정)
+    layer_of = {v["palette"]: v["layer"] for v in out.values()}
+    for c in answer.get("corrections", []):
+        k, pid = int(c["region"]), c["palette"]
+        out[k] = {"region": k, "palette": pid, "layer": name_of.get(pid) or layer_of.get(pid)}
+    return {**answer, "assignments": [out[k] for k in sorted(out)]}

@@ -21,7 +21,8 @@ server = MCPServer(
     instructions=(
         "선화 PSD에 밑색 레이어를 자동으로 깔아 주는 도구다. "
         "paint_psd로 칠한다. 레퍼런스가 다른 페이지면 paint_psd가 레퍼런스(P번호 팔레트)와 원고 번호 지도 이미지를 돌려준다. "
-        "그때는 이미지를 보고 원고 번호마다 같은 인물·같은 부위의 팔레트를 골라 apply_match를 호출한다. "
+        "그때는 이미지를 보고 먼저 인물마다 자세와 인체 구조를 따라 부위(머리카락·피부·겉옷 …)별 번호를 나눈 뒤, "
+        "레퍼런스에서 같은 인물의 부위별 팔레트를 골라 apply_match(people=…)를 호출한다. "
         "판단이 서지 않는 영역과 배경은 none으로 둔다. 엑스트라도 피부는 피부 팔레트를 고른다. "
         "apply_match가 돌려준 칠한 결과 지도를 보고 틀린 곳이 있으면 한 번 고쳐 다시 호출한다."
     ),
@@ -73,8 +74,8 @@ def _run(psd_path, out_path, opts):
     results = sorted(folder.glob("result_*.png")) if folder.exists() else []
     if results:
         out.append("[칠한 결과 지도] 번호마다 칠한 색이다. 분홍색은 none(회색 자동)이다. 레퍼런스와 비교해 "
-                   "틀린 번호(인물이 바뀐 색, 회색 피부, 덩어리 안 한 조각만 다른 색)가 있으면 고친 assignments로 "
-                   "apply_match를 다시 호출한다. 고칠 곳이 없으면 끝낸다.")
+                   "틀린 번호(인물이 바뀐 색, 회색 피부, 덩어리 안 한 조각만 다른 색)가 있으면 그 번호만 "
+                   "apply_match(job, assignments=[...])로 고친다. 고칠 곳이 없으면 끝낸다.")
         out += [Image(path=p) for p in results]
     return out
 
@@ -121,19 +122,30 @@ def paint_psd(psd_path: str, reference: str = "", output_dir: str = "", line_gro
 
 
 @server.tool()
-def apply_match(job: str, assignments: list[dict], layer_names: list[dict] | None = None):
+def apply_match(job: str, people: list[dict] | None = None, objects: list[dict] | None = None,
+                background: list[int] | None = None, assignments: list[dict] | None = None):
     """paint_psd가 돌려준 매칭 작업에 AI의 답을 적용해 칠한다.
 
     - job: paint_psd가 알려 준 매칭 작업 폴더 경로
-    - assignments: [{"region": 원고 번호, "palette": "P3" 또는 "none"}, ...] 모든 번호에 하나씩
-    - layer_names: 레퍼런스 팔레트에 이름이 없을 때 [{"palette": "P3", "layer": "머리"}, ...]
+    - people: 원고 인물마다 {"id", "description", "pose", "reference_character",
+              "parts": [{"part": 부위 이름, "regions": [번호…], "palette": "P3" 또는 "none"}]}
+      같은 인물의 같은 부위는 같은 색으로 칠한다. 피부를 none으로 두면 피부색으로 칠한다.
+    - objects: [{"name": 사물 이름, "regions": [번호…]}] (회색으로 자동 칠함), background: 배경 번호 목록 (칠하지 않음)
+    - assignments: 결과를 고칠 때만. [{"region": 번호, "palette": "P3" 또는 "none"}] 이전 답에서 이 번호들만 바꾼다
     """
     folder = Path(job)
     info = json.loads((folder / "job.json").read_text())
-    answer = {"assignments": assignments}
-    if layer_names:
-        answer["layer_names"] = layer_names
-    (folder / "answer.json").write_text(json.dumps(answer, ensure_ascii=False, indent=1))
+    answer_file = folder / "answer.json"
+    if people is not None:
+        answer = {"people": people, "objects": objects or [], "background": background or []}
+        if assignments:
+            answer["corrections"] = assignments
+    elif assignments and answer_file.exists():
+        answer = json.loads(answer_file.read_text())
+        answer["corrections"] = answer.get("corrections", []) + assignments
+    else:
+        answer = {"assignments": assignments or []}
+    answer_file.write_text(json.dumps(answer, ensure_ascii=False, indent=1))
     opts = Options(**info["options"])
     return _run(info["psd_path"], info["out_path"], opts)
 
