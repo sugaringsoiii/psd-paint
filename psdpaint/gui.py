@@ -468,7 +468,7 @@ class MainWindow(QMainWindow):
             combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         add("AI 매칭", self.ai_mode)
         self.ai_review = QCheckBox("칠한 결과를 한 번 더 보고 고치기 (요청 1회 추가)")
-        self.ai_review.setChecked(s.value("ai_review", True, bool))
+        self.ai_review.setChecked(s.value("ai_review", False, bool))
         add("검수", self.ai_review)
         self.ai_zoom = QCheckBox("인물마다 크게 잘라 부위를 다시 검토 (요청 1회 추가)")
         self.ai_zoom.setChecked(s.value("ai_zoom", True, bool))

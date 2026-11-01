@@ -108,10 +108,8 @@ def build_map(labels, boundary, cand_ids, colors=None, groups=None):
     lut[cand_ids] = np.arange(1, len(cand_ids) + 1)
     kmap = lut[labels]
     if colors is None:
-        if groups is None:
-            groups = np.arange(len(cand_ids))
-        _, gidx = np.unique(groups, return_inverse=True)
-        colors = np.random.default_rng(0).integers(175, 245, (gidx.max() + 1, 3))[gidx]
+        # 바탕색을 칠하면 AI가 실제 옷 색으로 착각한다(분홍 머리, 민트 스웨터). 원고처럼 흰 바탕에 번호만 얹는다
+        colors = np.full((len(cand_ids), 3), 255)
     tint = np.vstack([[255, 255, 255], colors]).astype(np.uint8)
     rgb = tint[kmap]
     rgb[boundary] = 0
@@ -222,7 +220,8 @@ def make_job(labels, boundary, cand_ids, ref_rgb, palette, masks):
                              for p in palette)
     areas = np.bincount(labels.ravel(), minlength=labels.max() + 1)[cand_ids]
     full_map, kmap = build_map.last
-    prompt = FULL_PROMPT.format(parts=", ".join(PARTS), palette_list=palette_list, count=len(cand_ids))
+    prompt = FULL_PROMPT.format(parts=", ".join(PARTS), palette_list=palette_list, count=len(cand_ids),
+                                groups=group_text(groups=groups))
     schema = full_schema(ids)
     return Job(cands, palette, ref_images, map_images, prompt, schema, palette_text=palette_list,
                groups=groups, areas=areas, full_map=full_map, kmap=kmap)
@@ -477,18 +476,23 @@ PARTS = ["머리카락", "피부", "겉옷", "상의", "셔츠", "넥타이·리
 LAYER_OF_PART = {"머리카락": "머리", "넥타이·리본": "넥타이", "머리띠·모자": "머리띠", "장신구·소품": "소품"}
 
 SCENE_RULES = """장면을 이해하는 순서
-1. 인물을 하나씩 찾는다. 인물마다 자세(서 있음·앉음·고개 숙임·팔 위치 등)와 겉모습(머리모양·머리띠·옷차림)을 적는다.
+1. 인물을 하나씩 찾는다. 인물마다 자세(서 있음·앉음·고개 숙임·팔 위치 등)와 겉모습(얼굴·머리모양·머리띠·옷차림)을 적는다.
+   같은 인물이 여러 컷에 나오면(전신 컷과 클로즈업 등) 하나의 id에 모은다. 단, 머리모양·머리띠·얼굴이 다르면 다른 인물이다.
+   서로 다른 두 사람을 한 id로 합치지 않는다. 손·팔만 보여도 그 컷의 인물에 붙인다.
 2. 자세를 바탕으로 인체 구조를 따라간다. 머리 → 얼굴·목 → 몸통 → 양팔(소매와 손) → 다리(하의와 신발) 순서로, 가려진 부분이 어디로 이어지는지 생각한다.
 3. 옷은 겹침 순서로 나눈다. 겉옷(재킷·가디건·코트) / 상의(스웨터·니트·티셔츠·조끼) / 셔츠(깃·소매 끝) / 넥타이·리본 / 하의 / 치마 / 신발 / 양말.
    팔 전체가 겉옷 소매면 소매 조각은 모두 겉옷이다. 소매 끝으로 보이는 셔츠 조각만 셔츠다.
-4. 주름선이나 끊긴 선으로 나뉜 조각은 같은 옷이다. 지도에서 바탕색이 같은 번호들은 선이 끊긴 틈으로 이어진 한 덩어리다.
+4. 주름선이나 끊긴 선으로 나뉜 조각은 같은 옷이다. 아래 '이어진 묶음'의 번호들은 선이 끊긴 틈으로 이어진 한 덩어리다.
+   지도는 흰 바탕의 선화에 번호만 얹은 것이다. 색은 그림에 없으므로 옷 색을 짐작해 적지 않는다.
 5. 피부는 얼굴·목·귀·손·팔·다리처럼 맨살이 보이는 곳이다. 머리카락과 얼굴 경계를 특히 조심한다(앞머리 사이로 보이는 이마는 피부).
 6. 의자·컵·폰 같은 사물은 objects에, 하늘·벽·바닥 같은 배경은 background에 넣는다.
 7. 지도의 모든 번호를 빠짐없이 정확히 한 곳(인물의 부위, objects, background)에 넣는다."""
 
 COLOR_RULES = """색을 정하는 순서
 1. 레퍼런스 인물마다 알아볼 특징과 부위별 팔레트를 정리한다.
-2. 원고 인물마다 같은 레퍼런스 인물을 찾는다(머리모양·머리띠·옷차림). 찾으면 부위마다 그 인물의 팔레트를 쓴다.
+2. 원고 인물마다 같은 레퍼런스 인물을 찾는다. 얼굴·머리모양·머리띠로 알아보고 옷차림은 참고만 한다(옷은 회차마다 바뀐다).
+   찾으면 머리카락·피부·머리띠는 그 인물의 팔레트를 쓴다. 옷도 같은 종류(교복 재킷·셔츠·넥타이 등)면 그 팔레트를 쓰고,
+   확실히 다른 옷(레퍼런스에 없는 스웨터 등)일 때만 none으로 둔다.
 3. 레퍼런스에 없는 인물(엑스트라)은 피부만 피부 팔레트를 고르고, 나머지 부위는 none으로 둔다.
 4. 피부는 엑스트라도 반드시 피부 팔레트다."""
 
@@ -507,6 +511,7 @@ FULL_PROMPT = """웹툰 밑색 작업이다. 이미지 두 묶음을 준다.
   parts(부위마다 part, regions(번호 목록), palette(P번호 또는 none)).
 - objects: 사물 이름과 번호 목록. background: 배경 번호 목록.
 부위 이름: {parts}
+이어진 묶음: {groups}
 팔레트: {palette_list}
 영역 번호: 1 ~ {count}"""
 
@@ -517,6 +522,7 @@ SCENE_PROMPT = """웹툰 밑색 작업의 첫 단계다. [원고 지도]는 칠�
 
 답 형식: analysis(장면 요약), people(id, description, pose, parts[part, regions]), objects(name, regions), background(번호 목록)
 부위 이름: {parts}
+이어진 묶음: {groups}
 영역 번호: 1 ~ {count}"""
 
 ZOOM_PROMPT = """웹툰 밑색 작업의 확대 검토다. [인물 확대]는 인물마다 원고 지도를 크게 잘라 낸 그림이다(번호가 같다).
@@ -592,6 +598,19 @@ def _scene_text(scene):
     return "\n".join(lines)
 
 
+def group_text(job=None, groups=None):
+    """이어진 묶음(번호 2개 이상)을 글로 적는다. 예: [29, 30, 31] [40, 45]"""
+    groups = job.groups if groups is None else groups
+    if groups is None:
+        return "없음"
+    out = []
+    for g in np.unique(groups):
+        ks = np.nonzero(groups == g)[0] + 1
+        if len(ks) > 1:
+            out.append("[" + ", ".join(map(str, ks)) + "]")
+    return " ".join(out) or "없음"
+
+
 def person_crops(job, scene, max_side=1000):
     """인물마다 원고 지도를 잘라 크게 만든다. → [(인물 id, 이미지)]"""
     out = []
@@ -632,7 +651,8 @@ def ask_structured(job, provider, api_key, model, zoom=True, say=None):
 
     count = len(job.candidates) - 1
     say("AI 장면 이해 중")
-    scene = run(_sub(job, [], job.map_images, SCENE_PROMPT.format(parts=", ".join(PARTS), count=count),
+    scene = run(_sub(job, [], job.map_images, SCENE_PROMPT.format(parts=", ".join(PARTS), count=count,
+                                                                   groups=group_text(job)),
                      scene_schema()))
     crops = person_crops(job, scene)
     if zoom and crops:

@@ -22,7 +22,8 @@ class Options:
     ai_provider: str = "claude"
     ai_model: str = "claude-opus-5-5"
     ai_key: str = ""                    # 실행할 때만 넘긴다. 설정 파일에 저장하지 않는다
-    ai_review: bool = True              # 칠한 결과를 AI가 한 번 더 보고 틀린 곳을 고친다 (요청 1회 추가)
+    ai_review: bool = False             # 칠한 결과를 AI가 한 번 더 보고 틀린 곳을 고친다 (요청 1회 추가).
+                                        # 구조화 매칭에서는 없는 오류를 지어내 오히려 망치는 일이 있어 기본으로 끈다
     ai_zoom: bool = True                # 인물마다 크게 잘라 부위 나누기를 다시 검토한다 (요청 1회 추가)
     extra_boundary: list = field(default_factory=lambda: ["컷*", "*테두리*"])  # 경계로 쓸 픽셀 레이어 이름 패턴
     output_group: str = "밑색"
