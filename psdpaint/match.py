@@ -474,6 +474,9 @@ def apply_answer(job, answer, n_regions):
 PARTS = ["머리카락", "피부", "겉옷", "상의", "셔츠", "넥타이·리본", "하의", "치마", "신발", "양말",
          "머리띠·모자", "장신구·소품", "기타"]
 LAYER_OF_PART = {"머리카락": "머리", "넥타이·리본": "넥타이", "머리띠·모자": "머리띠", "장신구·소품": "소품"}
+# 레퍼런스 색이 없는 부위(엑스트라의 옷 등)에 쓰는 회색. 같은 인물의 같은 부위는 조각이 나뉘어도 한 회색으로 칠한다
+PART_TONES = {"머리카락": 105, "겉옷": 150, "상의": 185, "셔츠": 235, "넥타이·리본": 110, "하의": 125, "치마": 125,
+              "신발": 80, "양말": 95, "머리띠·모자": 140, "장신구·소품": 160, "기타": 200}
 
 SCENE_RULES = """장면을 이해하는 순서
 1. 인물을 하나씩 찾는다. 인물마다 자세(서 있음·앉음·고개 숙임·팔 위치 등)와 겉모습(얼굴·머리모양·머리띠·옷차림)을 적는다.
@@ -482,7 +485,8 @@ SCENE_RULES = """장면을 이해하는 순서
 2. 자세를 바탕으로 인체 구조를 따라간다. 머리 → 얼굴·목 → 몸통 → 양팔(소매와 손) → 다리(하의와 신발) 순서로, 가려진 부분이 어디로 이어지는지 생각한다.
 3. 옷은 겹침 순서로 나눈다. 겉옷(재킷·가디건·코트) / 상의(스웨터·니트·티셔츠·조끼) / 셔츠(깃·소매 끝) / 넥타이·리본 / 하의 / 치마 / 신발 / 양말.
    팔 전체가 겉옷 소매면 소매 조각은 모두 겉옷이다. 소매 끝으로 보이는 셔츠 조각만 셔츠다.
-4. 주름선이나 끊긴 선으로 나뉜 조각은 같은 옷이다. 아래 '이어진 묶음'의 번호들은 선이 끊긴 틈으로 이어진 한 덩어리다.
+4. 주름선이나 끊긴 선으로 나뉜 조각은 같은 옷이다. 의자 등받이·책상·다른 사람 팔처럼 앞에 있는 사물이 몸을 가로질러
+   나눈 조각도 같은 옷이다 (가려진 너머로 옷이 이어진다). 아래 '이어진 묶음'의 번호들은 선이 끊긴 틈으로 이어진 한 덩어리다.
    지도는 흰 바탕의 선화에 번호만 얹은 것이다. 색은 그림에 없으므로 옷 색을 짐작해 적지 않는다.
 5. 피부는 얼굴·목·귀·손·팔·다리처럼 맨살이 보이는 곳이다. 머리카락과 얼굴 경계를 특히 조심한다(앞머리 사이로 보이는 이마는 피부).
 6. 의자·컵·폰 같은 사물은 objects에, 하늘·벽·바닥 같은 배경은 background에 넣는다.
@@ -687,11 +691,20 @@ def structured_to_assignments(job, answer):
         next((p["id"] for p in job.palette if min(p["rgb"]) >= 248), None)
     name_of = {p["id"]: p.get("name") for p in job.palette}
     out = {}
-    for person in answer.get("people", []):
+    for n, person in enumerate(answer.get("people", [])):
         for part in person.get("parts", []):
             pid = part.get("palette", "none")
             if part["part"] == "피부" and pid == "none" and skin:
                 pid = skin
+            if pid == "none" and part.get("regions"):
+                # 레퍼런스에 없는 부위: 인물×부위마다 회색 하나를 만들어 조각이 나뉘어도 같은 색으로 칠한다.
+                # 옆 사람과 섞이지 않게 인물마다 조금씩 밝기를 바꾼다
+                tone = int(np.clip(PART_TONES.get(part["part"], 200) + (n % 3 - 1) * 12, 40, 245))
+                pid = f"auto:{person['id']}:{part['part']}"
+                if pid not in name_of:
+                    job.palette.append({"id": pid, "rgb": (tone, tone, tone),
+                                        "name": LAYER_OF_PART.get(part["part"], part["part"])})
+                    name_of[pid] = job.palette[-1]["name"]
             layer = name_of.get(pid) or LAYER_OF_PART.get(part["part"], part["part"])
             for k in part.get("regions", []):
                 out[int(k)] = {"region": int(k), "palette": pid, "layer": layer}
