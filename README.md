@@ -173,9 +173,22 @@ python3 -m venv .venv
 ## 계획
 
 - [x] GUI 앱: 파일 여러 개 끌어 넣기, 진행 표시, 미리보기, 결과 파일·폴더 열기
-- [ ] macOS `.app`, Windows `.exe` 빌드 (GitHub Actions)
+- [x] macOS `.app`(.dmg), Windows `.exe`(.zip) 빌드 (GitHub Actions, 태그 푸시 시 릴리스)
 - [x] AI 매칭: 다른 페이지·캐릭터 시트 레퍼런스 (Claude API, 요청 폴더)
 - [x] MCP 서버: Claude 데스크톱·Claude Code에서 구독으로 AI 매칭
+
+## 버전과 릴리스
+
+- 버전은 `psdpaint/__init__.py`의 `__version__`에 적는다 (예: `0.1.0`). 앱 제목줄에 표시된다.
+- 릴리스: 버전을 올려 커밋한 뒤 같은 번호의 태그를 푸시한다. GitHub Actions(`.github/workflows/release.yml`)가 Mac(Apple Silicon)·Windows 설치 파일을 만들어 Releases에 올린다. 태그와 앱 버전이 다르면 빌드를 멈춘다.
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+- 평소 코드 푸시로는 빌드하지 않는다. Actions 탭에서 손으로 실행하면 설치 파일만 만들어 보관한다(릴리스 없음).
+- 로컬 빌드: `.venv/bin/pip install pyinstaller && .venv/bin/python build.py` → `dist/`
+- 설치 앱 실행 옵션: 인자 없이 = 앱 창, `--mcp` = MCP 서버, `--version` = 버전 출력
 
 ## 개발 도구
 

@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 import threading
 from dataclasses import replace
 
-from . import ai, style
+from . import __version__, ai, style
 from .cli import output_path
 from .core import (AwaitingAnswer, Options, PaintError, next_options, paint, quick_preview, region_at,
                    repaint, set_region)
@@ -372,7 +372,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("psd-paint")
+        self.setWindowTitle(f"psd-paint {__version__}")
         self.resize(1180, 780)
         self.settings = QSettings(APP_NAME, APP_NAME)
         self.thread = None
@@ -416,7 +416,7 @@ class MainWindow(QMainWindow):
     # ---- 화면 구성 ----
     def build_header(self):
         title = label("psd-paint", "title")
-        sub = label("선화 PSD 자동 밑색", "subtitle")
+        sub = label(f"선화 PSD 자동 밑색 · v{__version__}", "subtitle")
         names = QVBoxLayout()
         names.setSpacing(2)
         names.addWidget(title)
@@ -1407,6 +1407,8 @@ def main():
     app.setStyleSheet(style.QSS)
     win = MainWindow()
     win.show()
+    if os.environ.get("PSDPAINT_SELFTEST"):  # 빌드 확인용: 창을 띄운 뒤 바로 닫는다
+        QTimer.singleShot(1500, app.quit)
     return app.exec()
 
 

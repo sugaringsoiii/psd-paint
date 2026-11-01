@@ -9,3 +9,8 @@ out/
 *.psd
 *.psb
 *.clip
+
+# 빌드 결과
+build/
+dist/
+*.spec

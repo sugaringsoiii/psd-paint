@@ -11,15 +11,23 @@
 
 ## 1. 다운로드와 설치
 
-> macOS `.app` · Windows `.exe` 설치 파일은 준비 중입니다. 지금은 아래처럼 저장소를 받아 설치합니다.
+### 설치 파일 (추천)
+[Releases](https://github.com/aejinyoo/psd-paint/releases) 에서 최신 버전을 받습니다.
 
-### 필요한 것
-- Python 3.11 이상 ([python.org](https://www.python.org/downloads/)에서 설치)
-- Git (macOS는 처음 `git`을 실행하면 설치 창이 뜹니다)
+| 컴퓨터 | 받을 파일 | 설치 |
+|---|---|---|
+| Mac (Apple Silicon, M1 이후) | `psd-paint-<버전>-mac-arm64.dmg` | 열어서 `psd-paint`를 **응용 프로그램** 폴더로 끌어 놓습니다 |
+| Windows | `psd-paint-<버전>-windows.zip` | 압축을 풀고 `psd-paint` 폴더 안의 `psd-paint.exe`를 실행합니다 |
 
-### 설치 (macOS)
+**처음 실행할 때 경고가 뜨면** (개발자 서명이 없는 앱이라 뜹니다)
+- Mac: "확인되지 않은 개발자" → 응용 프로그램 폴더에서 `psd-paint`를 **우클릭 → 열기 → 열기**. 한 번만 하면 됩니다.
+  그래도 안 열리면 터미널에서 `xattr -dr com.apple.quarantine /Applications/psd-paint.app` 를 실행합니다.
+- Windows: "Windows의 PC 보호" → **추가 정보 → 실행**.
 
-터미널을 열고 차례로 실행합니다.
+Intel Mac용 설치 파일은 없습니다. Intel Mac에서는 아래 '소스로 설치'를 쓰세요.
+
+### 소스로 설치 (개발용·Intel Mac)
+Python 3.11 이상과 Git이 필요합니다.
 
 ```bash
 git clone https://github.com/aejinyoo/psd-paint.git ~/psd-paint
@@ -29,32 +37,14 @@ git clone https://github.com/aejinyoo/psd-paint.git ~/psd-paint
 cd ~/psd-paint && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
 
-### 설치 (Windows)
-
-PowerShell에서 실행합니다.
-
-```powershell
-git clone https://github.com/aejinyoo/psd-paint.git $HOME\psd-paint
-cd $HOME\psd-paint; python -m venv .venv; .venv\Scripts\pip install -r requirements.txt
-```
-
-### 업데이트
-
-```bash
-cd ~/psd-paint && git pull && .venv/bin/pip install -r requirements.txt
-```
+실행: `cd ~/psd-paint && .venv/bin/python -m psdpaint.gui`
 
 ---
 
 ## 2. 방법 A — 앱으로 쓰기
 
 ### 실행
-
-```bash
-cd ~/psd-paint && .venv/bin/python -m psdpaint.gui
-```
-
-(Windows: `.venv\Scripts\python -m psdpaint.gui`)
+설치한 **psd-paint** 앱을 엽니다. 창 위쪽 제목 옆에 버전(v0.1.0 등)이 보입니다.
 
 ### 칠하기
 1. PSD 파일이나 폴더를 창에 끌어 놓습니다. 여러 개를 넣으면 순서대로 칠합니다.
@@ -107,7 +97,24 @@ cd ~/psd-paint && .venv/bin/python -m psdpaint.gui
 
 ## 3. 방법 B — MCP로 연결하기 (Claude 데스크톱·Claude Code)
 
-먼저 **1. 다운로드와 설치**를 마칩니다. 아래 경로의 `/Users/내이름/psd-paint`는 실제로 설치한 경로로 바꿉니다(터미널에서 `cd ~/psd-paint && pwd`로 확인).
+먼저 **1. 다운로드와 설치**를 마칩니다. 설치 앱은 `--mcp`를 붙여 실행하면 MCP 서버가 됩니다.
+
+**설치 파일로 설치했다면 (Mac)** — `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "psd-paint": {
+      "command": "/Applications/psd-paint.app/Contents/MacOS/psd-paint",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+Windows는 `"command": "C:\\경로\\psd-paint\\psd-paint.exe"`, `"args": ["--mcp"]` 로 적습니다.
+
+**소스로 설치했다면** 아래처럼 적습니다. 아래 경로의 `/Users/내이름/psd-paint`는 실제로 설치한 경로로 바꿉니다(터미널에서 `cd ~/psd-paint && pwd`로 확인).
 
 ### Claude 데스크톱
 
@@ -173,6 +180,7 @@ Claude가 알아서 순서대로 진행합니다.
 | 증상 | 해결 |
 |---|---|
 | `CERTIFICATE_VERIFY_FAILED` | 최신 버전으로 업데이트하세요. OS 인증서 저장소를 씁니다 |
+| Mac에서 앱이 안 열림 | 우클릭 → 열기, 또는 `xattr -dr com.apple.quarantine /Applications/psd-paint.app` |
 | AI 매칭이 오래 걸림 | 이미지 여러 장을 보고 판단하느라 1~3분 걸릴 수 있습니다(제한 10분) |
 | 인물 색이 뒤바뀜·엑스트라가 회색 | 레퍼런스에 그 인물이 나와야 색을 맞춥니다. 캐릭터 시트를 레퍼런스로 쓰거나 `참고` 폴더에 점을 찍어 보완하세요. 결과 폴더(`…_AI매칭/answer.json`)를 고쳐 '요청 폴더' 방식으로 다시 실행해도 됩니다 |
 | MCP 도구가 안 보임 | 설정 파일 경로·JSON 문법을 확인하고 Claude 데스크톱을 완전히 종료 후 다시 여세요 |

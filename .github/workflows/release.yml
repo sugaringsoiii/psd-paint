@@ -1,0 +1,68 @@
+# v로 시작하는 태그(예: v0.1.0)를 푸시하면 Mac·Windows 설치 파일을 만들어 GitHub Releases에 올린다.
+# 평소 코드 푸시로는 빌드하지 않는다. Actions 탭에서 손으로 실행하면 설치 파일만 만들어 보관한다(릴리스 없음).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest   # Apple Silicon (M1 이후). Intel Mac은 지원하지 않는다
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 태그와 앱 버전이 같은지 확인
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          app=$(python -c "import re;print(re.search(r'__version__ = \"(.+?)\"', open('psdpaint/__init__.py', encoding='utf-8').read()).group(1))")
+          tag=${GITHUB_REF_NAME#v}
+          if [ "$app" != "$tag" ]; then echo "태그 $tag 와 앱 버전 $app 이 다릅니다"; exit 1; fi
+
+      - name: 의존성 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: 빌드
+        run: python build.py
+
+      - name: 빌드한 앱 실행 확인
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            dist/psd-paint.app/Contents/MacOS/psd-paint --version
+          else
+            dist/psd-paint/psd-paint.exe --version
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: psd-paint-${{ matrix.os }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+
+      - name: 릴리스에 올리기
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.dmg
+            dist/*.zip
+          generate_release_notes: true
