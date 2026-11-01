@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# 작업물·결과물 (원고는 저장소에 올리지 않는다)
+work/
+out/
+*.psd
+*.psb
+*.clip
