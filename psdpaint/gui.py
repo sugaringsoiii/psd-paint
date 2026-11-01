@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QObject, QRectF, QSettings, Qt, QThread, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout,
     QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
@@ -826,6 +826,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setWindowIcon(QIcon(str(Path(__file__).parent / "assets" / "icon.png")))
     app.setStyle("Fusion")
     app.setStyleSheet(style.QSS)
     win = MainWindow()
