@@ -11,7 +11,7 @@ from PySide6.QtCore import QObject, QRectF, QSettings, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
+    QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QRadioButton, QScrollArea, QSpinBox, QTabWidget,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
@@ -24,6 +24,7 @@ from .core import Options, PaintError, paint
 
 APP_NAME = "psd-paint"
 COL_FILE, COL_STATUS, COL_INFO = range(3)
+LABEL_W = 96  # 설정 탭 라벨 고정폭
 
 
 def open_path(path, reveal=False):
@@ -260,8 +261,8 @@ class MainWindow(QMainWindow):
 
         # 미리보기 탭
         self.preview = QLabel("완료된 파일을 고르면\n미리보기가 나옵니다")
-        self.preview.setObjectName("muted")
-        self.preview.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+        self.preview.setObjectName("empty")
+        self.preview.setAlignment(Qt.AlignCenter)
         self.scroll = QScrollArea()
         self.scroll.setObjectName("preview")
         self.scroll.setWidgetResizable(True)
@@ -291,14 +292,67 @@ class MainWindow(QMainWindow):
         return c
 
     def build_settings(self):
+        """설정 탭. 모든 행을 '고정폭 라벨 | 입력' 두 칸 격자에 맞춘다."""
         s = self.settings
         d = Options()
         w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(0, 8, 0, 0)
-        v.setSpacing(14)
+        grid = QGridLayout(w)
+        grid.setContentsMargins(0, 8, 8, 8)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+        grid.setColumnMinimumWidth(0, LABEL_W)
+        grid.setColumnStretch(1, 1)
+        row = 0
 
-        # 참고(레퍼런스) 방식
+        def section(text):
+            nonlocal row
+            lb = label(text, "section")
+            if row:
+                grid.setRowMinimumHeight(row, 10)
+                row += 1
+            grid.addWidget(lb, row, 0, 1, 2)
+            row += 1
+
+        def add(text, item):
+            nonlocal row
+            if text:
+                lb = label(text, "field")
+                lb.setFixedWidth(LABEL_W)
+                grid.addWidget(lb, row, 0, Qt.AlignLeft | Qt.AlignVCenter)
+            if isinstance(item, QWidget):
+                grid.addWidget(item, row, 1)
+            else:
+                grid.addLayout(item, row, 1)
+            row += 1
+
+        def hbox(*items, stretch=False):
+            h = QHBoxLayout()
+            h.setSpacing(8)
+            for it in items:
+                h.addWidget(it)
+            if stretch:
+                h.addStretch()
+            return h
+
+        def vbox(*items):
+            box = QVBoxLayout()
+            box.setSpacing(4)
+            for it in items:
+                box.addWidget(it)
+            return box
+
+        def spin(lo, hi, value, suffix="", special=""):
+            sp = QSpinBox()
+            sp.setRange(lo, hi)
+            if suffix:
+                sp.setSuffix(suffix)
+            if special:
+                sp.setSpecialValueText(special)
+            sp.setValue(value)
+            sp.setFixedWidth(120)
+            return sp
+
+        # 참고 방식
         self.src_layer = QRadioButton("파일 안 참고 레이어")
         self.src_layer.setToolTip("PSD 안의 '참고' 폴더(점·낙서 힌트) 또는 칠해 둔 '참고' 레이어를 봅니다.\n"
                                   "없으면 PSD 옆의 '파일이름_참고.png'를 찾고, 그것도 없으면 자동으로 칠합니다")
@@ -313,21 +367,18 @@ class MainWindow(QMainWindow):
         self.hint_path.setPlaceholderText("레퍼런스 파일")
         self.hint_browse = QPushButton("찾기")
         self.hint_browse.clicked.connect(self.pick_hint_path)
-        ref_row = QHBoxLayout()
-        ref_row.addWidget(self.hint_path)
-        ref_row.addWidget(self.hint_browse)
-        ref_note = label("레퍼런스 이미지·PSD는 같은 페이지(같은 크기)를 칠한 것이어야 합니다. "
+        ref_note = label("같은 페이지(같은 크기)를 칠한 레퍼런스만 쓸 수 있습니다. "
                          "다른 페이지를 보고 칠하는 기능은 AI 연결로 준비 중입니다.", "summary")
         ref_note.setWordWrap(True)
-        v.addWidget(label("참고 방식", "section"))
+        section("참고 방식")
+        add("방식", vbox(self.src_layer, self.src_image, self.src_psd))
+        add("레퍼런스", hbox(self.hint_path, self.hint_browse))
+        add("", ref_note)
         for b in (self.src_layer, self.src_image, self.src_psd):
-            v.addWidget(b)
             b.toggled.connect(self.update_ref_enabled)
-        v.addLayout(ref_row)
-        v.addWidget(ref_note)
         self.update_ref_enabled()
 
-        # 결과 위치
+        # 결과
         self.same_dir = QRadioButton("원본과 같은 폴더")
         self.other_dir = QRadioButton("지정한 폴더")
         group = QButtonGroup(w)
@@ -339,19 +390,10 @@ class MainWindow(QMainWindow):
         browse = QPushButton("찾기")
         browse.clicked.connect(self.pick_out_dir)
         self.suffix = QLineEdit(s.value("suffix", "_밑색"))
-        radios = QHBoxLayout()
-        radios.addWidget(self.same_dir)
-        radios.addWidget(self.other_dir)
-        radios.addStretch()
-        out_row = QHBoxLayout()
-        out_row.addWidget(self.out_dir)
-        out_row.addWidget(browse)
-        f1 = QFormLayout()
-        f1.addRow("파일 이름 뒤", self.suffix)
-        v.addWidget(label("결과", "section"))
-        v.addLayout(radios)
-        v.addLayout(out_row)
-        v.addLayout(f1)
+        section("결과")
+        add("저장 위치", hbox(self.same_dir, self.other_dir, stretch=True))
+        add("결과 폴더", hbox(self.out_dir, browse))
+        add("파일 이름 뒤", self.suffix)
 
         # 레이어 이름
         self.line_group = QLineEdit(s.value("line_group", d.line_group))
@@ -362,38 +404,27 @@ class MainWindow(QMainWindow):
         self.background.setToolTip("배경 레이어·폴더 이름 패턴. 선화 폴더 안에 있어도 경계에서 빼고, 결과에서는 끕니다")
         self.hide_bg = QCheckBox("결과 PSD에서 배경 끄기")
         self.hide_bg.setChecked(s.value("hide_bg", d.hide_background, bool))
-        f2 = QFormLayout()
-        f2.addRow("선화 폴더", self.line_group)
-        f2.addRow("참고 폴더", self.hint_group)
-        f2.addRow("경계 레이어", self.boundary)
-        f2.addRow("배경 이름", self.background)
-        f2.addRow("", self.hide_bg)
-        v.addWidget(label("레이어", "section"))
-        v.addLayout(f2)
+        section("레이어")
+        add("선화 폴더", self.line_group)
+        add("참고 폴더", self.hint_group)
+        add("경계 레이어", self.boundary)
+        add("배경 이름", self.background)
+        add("", self.hide_bg)
 
         # 칠하기
         self.auto_fill = QCheckBox("힌트 없는 영역 회색으로 자동 칠하기")
         self.auto_fill.setChecked(s.value("auto_fill", d.auto_fill, bool))
-        self.max_layers = QSpinBox()
-        self.max_layers.setRange(0, 50)
-        self.max_layers.setSpecialValueText("제한 없음")
-        self.max_layers.setValue(s.value("max_layers", d.max_layers, int))
-        self.max_layers.setToolTip("넘으면 칠한 면적이 작은 레이어부터 '기타' 레이어로 합칩니다")
-        self.offset = QSpinBox()
-        self.offset.setRange(0, 10)
-        self.offset.setSuffix(" px")
-        self.offset.setValue(s.value("offset", d.offset_px, int))
-        self.gap = QSpinBox()
-        self.gap.setRange(0, 10)
-        self.gap.setSuffix(" px")
-        self.gap.setValue(s.value("gap", d.gap_close_px, int))
-        f3 = QFormLayout()
-        f3.addRow("", self.auto_fill)
-        f3.addRow("레이어 최대", self.max_layers)
-        f3.addRow("윤곽 안쪽으로", self.offset)
-        f3.addRow("선 틈 닫기", self.gap)
-        v.addWidget(label("칠하기", "section"))
-        v.addLayout(f3)
+        self.max_layers = spin(0, 50, s.value("max_layers", d.max_layers, int), " 개", "제한 없음")
+        cap_note = label("넘으면 면적이 작은 레이어부터 '기타'로 합칩니다. 0이면 제한하지 않습니다.", "summary")
+        cap_note.setWordWrap(True)
+        self.offset = spin(0, 10, s.value("offset", d.offset_px, int), " px")
+        self.gap = spin(0, 10, s.value("gap", d.gap_close_px, int), " px")
+        section("칠하기")
+        add("", self.auto_fill)
+        add("레이어 상한", hbox(self.max_layers, stretch=True))
+        add("", cap_note)
+        add("윤곽 안쪽으로", hbox(self.offset, stretch=True))
+        add("선 틈 닫기", hbox(self.gap, stretch=True))
 
         # AI 연결
         self.provider = QComboBox()
@@ -410,29 +441,18 @@ class MainWindow(QMainWindow):
         self.ai_status.setWordWrap(True)
         self.provider.currentIndexChanged.connect(self.load_provider)
         self.api_key.editingFinished.connect(self.save_api_key)
-        key_row = QHBoxLayout()
-        key_row.addWidget(self.api_key)
-        key_row.addWidget(self.test_btn)
-        f4 = QFormLayout()
-        f4.addRow("제공자", self.provider)
-        f4.addRow("모델", self.model)
-        f4.addRow("API 키", key_row)
-        f4.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        f4.setHorizontalSpacing(14)
-        f4.setVerticalSpacing(8)
-        v.addWidget(label("AI 연결 (선택)", "section"))
-        v.addLayout(f4)
-        v.addWidget(self.ai_status)
+        section("AI 연결 (선택)")
+        add("제공자", self.provider)
+        add("모델", self.model)
+        add("API 키", hbox(self.api_key, self.test_btn))
+        add("", self.ai_status)
         self.ai_test_done.connect(self.on_ai_test)
         self.load_provider()
-        v.addStretch()
+        grid.setRowStretch(row, 1)
 
-        for form in (f1, f2, f3):
-            form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            form.setHorizontalSpacing(14)
-            form.setVerticalSpacing(8)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setWidget(w)
         self.settings_page = w
         return scroll
@@ -683,11 +703,13 @@ class MainWindow(QMainWindow):
         if result is None or result.preview is None:
             self.preview_pix = None
             self.preview.setPixmap(QPixmap())
+            self.preview.setAlignment(Qt.AlignCenter)
             self.preview.setText("완료된 파일을 고르면\n미리보기가 나옵니다")
             self.preview_info.setText("")
             return
         self._qimage = ImageQt(result.preview.convert("RGB"))  # QImage가 쓰는 동안 버퍼를 살려 둔다
         self.preview_pix = QPixmap.fromImage(self._qimage)
+        self.preview.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.preview_info.setText(self.describe(result))
         self.fit_preview()
 

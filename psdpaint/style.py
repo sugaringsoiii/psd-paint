@@ -1,4 +1,7 @@
 """앱 테마: 밝은 바탕에 보라 강조색을 쓰는 Linear 풍 스타일."""
+from pathlib import Path
+
+ASSETS = (Path(__file__).parent / "assets").as_posix()
 
 BG = "#F4F5F7"
 PANEL = "#FFFFFF"
@@ -36,6 +39,8 @@ QLabel#title {{ font-size: 16px; font-weight: 600; }}
 QLabel#subtitle, QLabel#muted {{ color: {MUTED}; }}
 QLabel#section {{ color: {MUTED}; font-size: 11px; font-weight: 600; letter-spacing: 0.5px; }}
 QLabel#summary {{ color: {MUTED}; font-size: 12px; }}
+QLabel#field {{ color: {TEXT}; }}
+QLabel#empty {{ color: {MUTED}; }}
 QLabel#ok {{ color: {OK}; font-size: 12px; }}
 QLabel#fail {{ color: {FAIL}; font-size: 12px; }}
 
@@ -64,7 +69,8 @@ QLineEdit, QSpinBox, QComboBox {{
     background: {PANEL};
     border: 1px solid {BORDER_HI};
     border-radius: 6px;
-    padding: 5px 8px;
+    padding: 6px;
+    min-height: 18px;
     selection-background-color: {ACCENT};
     selection-color: white;
 }}
@@ -79,15 +85,23 @@ QComboBox QAbstractItemView {{
     selection-color: {TEXT};
 }}
 
-QCheckBox, QRadioButton {{ spacing: 8px; background: transparent; }}
-QCheckBox::indicator, QRadioButton::indicator {{
-    width: 14px; height: 14px;
-    border: 1px solid {BORDER_HI};
+QCheckBox, QRadioButton {{ spacing: 8px; background: transparent; padding: 2px 0; }}
+QCheckBox::indicator {{
+    width: 16px; height: 16px;
+    border: 1px solid #C9CDD4;
+    border-radius: 4px;
     background: {PANEL};
 }}
-QCheckBox::indicator {{ border-radius: 4px; }}
-QRadioButton::indicator {{ border-radius: 8px; }}
-QCheckBox::indicator:checked, QRadioButton::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
+QCheckBox::indicator:hover {{ border-color: {ACCENT}; }}
+QCheckBox::indicator:checked {{
+    background: {ACCENT};
+    border-color: {ACCENT};
+    image: url({ASSETS}/check.svg);
+}}
+QCheckBox::indicator:checked:hover {{ background: {ACCENT_HI}; border-color: {ACCENT_HI}; }}
+QRadioButton::indicator {{ width: 16px; height: 16px; image: url({ASSETS}/radio-off.svg); }}
+QRadioButton::indicator:checked {{ image: url({ASSETS}/radio.svg); }}
+QCheckBox:disabled, QRadioButton:disabled {{ color: {FAINT}; }}
 
 QTreeWidget {{
     background: transparent;
