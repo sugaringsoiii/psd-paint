@@ -313,12 +313,14 @@ class MainWindow(QMainWindow):
             grid.addWidget(lb, row, 0, 1, 2)
             row += 1
 
-        def add(text, item):
+        def add(text, item, top=False):
             nonlocal row
             if text:
                 lb = label(text, "field")
                 lb.setFixedWidth(LABEL_W)
-                grid.addWidget(lb, row, 0, Qt.AlignLeft | Qt.AlignVCenter)
+                if top:  # 여러 줄 항목은 첫 줄에 맞춘다
+                    lb.setContentsMargins(0, 4, 0, 0)
+                grid.addWidget(lb, row, 0, Qt.AlignLeft | (Qt.AlignTop if top else Qt.AlignVCenter))
             if isinstance(item, QWidget):
                 grid.addWidget(item, row, 1)
             else:
@@ -350,6 +352,9 @@ class MainWindow(QMainWindow):
                 sp.setSpecialValueText(special)
             sp.setValue(value)
             sp.setFixedWidth(120)
+            # QSpinBox는 스타일시트 padding이 안쪽 입력칸에 먹지 않아 여백과 높이를 직접 맞춘다
+            sp.lineEdit().setTextMargins(6, 0, 6, 0)
+            sp.setFixedHeight(style.INPUT_H)
             return sp
 
         # 참고 방식
@@ -371,7 +376,7 @@ class MainWindow(QMainWindow):
                          "다른 페이지를 보고 칠하는 기능은 AI 연결로 준비 중입니다.", "summary")
         ref_note.setWordWrap(True)
         section("참고 방식")
-        add("방식", vbox(self.src_layer, self.src_image, self.src_psd))
+        add("방식", vbox(self.src_layer, self.src_image, self.src_psd), top=True)
         add("레퍼런스", hbox(self.hint_path, self.hint_browse))
         add("", ref_note)
         for b in (self.src_layer, self.src_image, self.src_psd):
@@ -402,17 +407,17 @@ class MainWindow(QMainWindow):
         self.boundary.setToolTip("선화 외에 경계로 쓸 레이어 이름. 쉼표로 구분하고 * 를 쓸 수 있습니다 (예: 컷*, スマートフォン*)")
         self.background = QLineEdit(s.value("background", ", ".join(d.background)))
         self.background.setToolTip("배경 레이어·폴더 이름 패턴. 선화 폴더 안에 있어도 경계에서 빼고, 결과에서는 끕니다")
-        self.hide_bg = QCheckBox("결과 PSD에서 배경 끄기")
+        self.hide_bg = QCheckBox("결과 PSD에서 배경 레이어 끄기")
         self.hide_bg.setChecked(s.value("hide_bg", d.hide_background, bool))
         section("레이어")
         add("선화 폴더", self.line_group)
         add("참고 폴더", self.hint_group)
         add("경계 레이어", self.boundary)
         add("배경 이름", self.background)
-        add("", self.hide_bg)
+        add("배경 끄기", self.hide_bg)
 
         # 칠하기
-        self.auto_fill = QCheckBox("힌트 없는 영역 회색으로 자동 칠하기")
+        self.auto_fill = QCheckBox("힌트 없는 영역을 회색으로 칠하기")
         self.auto_fill.setChecked(s.value("auto_fill", d.auto_fill, bool))
         self.max_layers = spin(0, 50, s.value("max_layers", d.max_layers, int), " 개", "제한 없음")
         cap_note = label("넘으면 면적이 작은 레이어부터 '기타'로 합칩니다. 0이면 제한하지 않습니다.", "summary")
@@ -420,7 +425,7 @@ class MainWindow(QMainWindow):
         self.offset = spin(0, 10, s.value("offset", d.offset_px, int), " px")
         self.gap = spin(0, 10, s.value("gap", d.gap_close_px, int), " px")
         section("칠하기")
-        add("", self.auto_fill)
+        add("자동 칠하기", self.auto_fill)
         add("레이어 상한", hbox(self.max_layers, stretch=True))
         add("", cap_note)
         add("윤곽 안쪽으로", hbox(self.offset, stretch=True))

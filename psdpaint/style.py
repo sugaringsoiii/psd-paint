@@ -21,6 +21,7 @@ FAIL = "#D64545"
 WARN = "#C98A00"
 
 GAP = 16  # 패널 사이 간격
+INPUT_H = 32  # 인풋 높이: 여백 6px×2 + 글자 18px + 테두리 1px×2
 
 QSS = f"""
 * {{
@@ -76,7 +77,9 @@ QLineEdit, QSpinBox, QComboBox {{
 }}
 QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{ border-color: {ACCENT}; }}
 QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled {{ color: {FAINT}; background: {RAISED}; }}
-QSpinBox::up-button, QSpinBox::down-button {{ width: 14px; border: none; background: transparent; }}
+QSpinBox {{ padding: 0; min-height: {INPUT_H - 2}px; max-height: {INPUT_H - 2}px; }}
+QSpinBox QLineEdit {{ padding: 0; border: none; background: transparent; min-height: 0; }}
+QSpinBox::up-button, QSpinBox::down-button {{ width: 0; border: none; }}
 QComboBox {{ padding-right: 28px; }}
 QComboBox::drop-down {{
     subcontrol-origin: padding;
