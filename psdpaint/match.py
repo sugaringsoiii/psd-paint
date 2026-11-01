@@ -33,7 +33,8 @@ PROMPT = """웹툰 밑색 작업이다. 이미지 두 묶음을 준다.
 할 일: 원고 지도의 숫자 영역마다, 레퍼런스에서 같은 인물의 같은 부위에 쓰인 팔레트(P번호)를 고른다.
 - 머리모양·액세서리·옷차림으로 같은 인물을 알아본다. 같은 인물이면 페이지가 달라도 같은 색을 쓴다.
 - 피부(얼굴·목·손), 머리카락, 옷(재킷·셔츠·넥타이·치마·바지 등), 소품을 구분한다.
-- 레퍼런스에 없는 인물·사물이거나 판단이 서지 않으면 "none"을 고른다. 억지로 고르지 않는다.
+- 피부(얼굴·목·귀·손·팔·다리)는 레퍼런스에 없는 인물(엑스트라)이어도 반드시 피부 팔레트를 고른다. 피부를 none으로 두면 회색으로 칠해진다.
+- 레퍼런스에 없는 인물의 머리카락·옷·사물이거나 판단이 서지 않으면 "none"을 고른다. 억지로 고르지 않는다.
 - 배경(하늘·벽·바닥 등)은 "none"이다.
 - 지도의 모든 숫자에 대해 하나씩 답한다.
 {palette_note}
@@ -154,6 +155,10 @@ def palette_from_layers(layers):
                 continue
             palette.append({"id": f"P{len(palette) + 1}", "rgb": ((c >> 16) & 255, (c >> 8) & 255, c & 255), "name": name})
             masks.append(solid & (packed == c))
+    # 피부 색이 없으면 흰 피부를 넣는다. 엑스트라 피부가 회색으로 칠해지지 않게 한다
+    if not any(p["name"] == "피부" for p in palette):
+        palette.append({"id": f"P{len(palette) + 1}", "rgb": (255, 255, 255), "name": "피부"})
+        masks.append(np.zeros(layers[0][1].shape[:2], bool) if layers else np.zeros((1, 1), bool))
     return palette, masks
 
 
@@ -176,7 +181,7 @@ def palette_from_image(rgba, quantize, tol, min_share):
             continue
         palette.append({"id": f"P{len(palette) + 1}", "rgb": tuple(rgb), "name": None})
         masks.append(body)
-    if has_white:
+    if has_white or not any(min(p["rgb"]) >= 248 for p in palette):
         palette.append({"id": f"P{len(palette) + 1}", "rgb": (255, 255, 255), "name": None,
                         "note": "흰색: 피부·흰 셔츠 등 칠하지 않은 듯 하얀 부위"})
         masks.append(np.zeros(solid.shape, bool))  # 바탕과 구분되지 않으므로 그림에는 표시하지 않는다
