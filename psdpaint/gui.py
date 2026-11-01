@@ -6,6 +6,7 @@ import time
 import traceback
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QObject, QRectF, QSettings, Qt, QThread, Signal
@@ -943,21 +944,38 @@ class MainWindow(QMainWindow):
 
     def edit_menu(self, st, region):
         """누른 조각에 쓸 레이어·색 메뉴. → 고른 (레이어, RGB), 비우기면 (None, None), 취소면 False"""
-        cur = st["region_key"][region]
+        cur = int(st["region_key"][region])
+        # 이 파일에서 실제로 쓰인 색만, 레이어 이름 순서대로 보여 준다. 같은 이름이 여럿이면 번호를 붙인다
+        used = set(int(k) for k in np.unique(st["region_key"]) if k >= 0) | ({cur} if cur >= 0 else set())
+        entries = []
+        for k in sorted(used, key=lambda k: (st["names"].index(st["keys"][k][0]) if st["keys"][k][0] in st["names"]
+                                             else len(st["names"]), k)):
+            name, rgb = st["keys"][k]
+            rgb = tuple(int(v) for v in rgb)
+            if (name, rgb) not in [(n, c) for n, c, _ in entries]:
+                entries.append((name, rgb, k))
+        count = {}
+        for name, _, _ in entries:
+            count[name] = count.get(name, 0) + 1
+        nth, labels = {}, {}
+        for name, rgb, k in entries:
+            nth[name] = nth.get(name, 0) + 1
+            labels[(name, rgb)] = f"{name} {nth[name]}" if count[name] > 1 else name
+
         menu = QMenu(self)
-        head = menu.addAction(f"지금: {st['keys'][cur][0] if cur >= 0 else '칠하지 않음'}")
+        cur_label = labels.get((st["keys"][cur][0], tuple(int(v) for v in st["keys"][cur][1]))) if cur >= 0 else None
+        head = menu.addAction(f"지금: {cur_label or '칠하지 않음'}")
         head.setEnabled(False)
         menu.addSeparator()
-        seen = set()
-        for name, rgb in st["keys"]:
-            rgb = tuple(int(v) for v in rgb)
-            if (name, rgb) in seen:
-                continue
-            seen.add((name, rgb))
-            act = menu.addAction(swatch(rgb), f"{name}  #{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}")
+        for name, rgb, _ in entries:
+            act = menu.addAction(swatch(rgb), f"{labels[(name, rgb)]}   #{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}")
             act.setData([name, list(rgb)])
+            if (name, rgb) == ((st["keys"][cur][0], tuple(int(v) for v in st["keys"][cur][1])) if cur >= 0 else None):
+                act.setEnabled(False)  # 지금 색은 고를 필요가 없다
         menu.addSeparator()
-        menu.addAction("칠하지 않음 (비우기)").setData("clear")
+        clear = menu.addAction("칠하지 않음 (비우기)")
+        clear.setData("clear")
+        clear.setEnabled(cur >= 0)
         menu.addAction("새 레이어…").setData("new")
         chosen = menu.exec(QCursor.pos())
         data = chosen.data() if chosen else None

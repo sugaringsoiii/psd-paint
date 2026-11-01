@@ -174,5 +174,23 @@ QScrollBar:horizontal {{ background: transparent; height: 8px; margin: 2px; }}
 QScrollBar::handle:horizontal {{ background: #D3D6DC; border-radius: 3px; min-width: 30px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+QMenu {{
+    background: {PANEL};
+    border: 1px solid {BORDER_HI};
+    border-radius: 8px;
+    padding: 4px;
+}}
+QMenu::item {{
+    background: transparent;
+    color: {TEXT};
+    padding: 6px 14px 6px 8px;
+    border-radius: 6px;
+    margin: 1px 0;
+}}
+QMenu::item:selected {{ background: {SELECT}; color: {TEXT}; }}
+QMenu::item:disabled {{ color: {FAINT}; background: transparent; }}
+QMenu::icon {{ padding-left: 8px; }}
+QMenu::separator {{ height: 1px; background: {BORDER}; margin: 4px 6px; }}
+QMenu::right-arrow {{ image: url({ASSETS}/chevron-down.svg); width: 12px; height: 12px; }}
 QToolTip {{ background: {TEXT}; color: white; border: none; padding: 6px; border-radius: 6px; }}
 """
