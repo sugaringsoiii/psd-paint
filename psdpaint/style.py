@@ -167,6 +167,8 @@ QTabBar::tab {{
 QTabBar::tab:selected {{ background: {HOVER}; color: {TEXT}; }}
 QTabBar::tab:hover:!selected {{ color: {TEXT}; }}
 
+QSplitter::handle {{ background: transparent; }}
+QSplitter::handle:hover {{ background: {ACCENT_SOFT}; border-radius: 3px; }}
 QScrollBar:vertical {{ background: transparent; width: 8px; margin: 2px; }}
 QScrollBar::handle:vertical {{ background: #D3D6DC; border-radius: 3px; min-height: 30px; }}
 QScrollBar::handle:vertical:hover {{ background: #BFC3CA; }}
@@ -192,5 +194,26 @@ QMenu::item:disabled {{ color: {FAINT}; background: transparent; }}
 QMenu::icon {{ padding-left: 8px; }}
 QMenu::separator {{ height: 1px; background: {BORDER}; margin: 4px 6px; }}
 QMenu::right-arrow {{ image: url({ASSETS}/chevron-down.svg); width: 12px; height: 12px; }}
+QFrame#picker {{
+    background: {PANEL};
+    border: 1px solid {BORDER_HI};
+    border-radius: 8px;
+}}
+QLabel#pickerHead {{ color: {FAINT}; font-size: 12px; padding: 4px 8px 6px 8px; }}
+QPushButton#pickerItem {{
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 8px;
+    text-align: left;
+}}
+QPushButton#pickerItem:hover {{ background: {SELECT}; }}
+QPushButton#pickerItem:disabled {{ color: {FAINT}; background: transparent; }}
+QFrame#pickerLine {{ background: {BORDER}; margin: 4px 6px; border: none; }}
+QListWidget#pickerList {{ background: transparent; border: none; outline: none; }}
+QListWidget#pickerList::item {{ height: 30px; padding-left: 4px; border-radius: 6px; color: {TEXT}; }}
+QListWidget#pickerList::item:hover {{ background: {SELECT}; }}
+QListWidget#pickerList::item:selected {{ background: {SELECT}; color: {TEXT}; }}
+QListWidget#pickerList::item:disabled {{ color: {FAINT}; }}
 QToolTip {{ background: {TEXT}; color: white; border: none; padding: 6px; border-radius: 6px; }}
 """

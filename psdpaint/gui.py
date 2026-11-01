@@ -9,12 +9,14 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 from PIL.ImageQt import ImageQt
-from PySide6.QtCore import QEvent, QObject, QRectF, QSettings, Qt, QThread, Signal
-from PySide6.QtGui import QColor, QCursor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import QEvent, QEventLoop, QObject, QRectF, QSettings, QSize, Qt, QThread, Signal
+from PySide6.QtGui import QColor, QCursor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout,
-    QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QTabWidget,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
+    QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMainWindow, QMenu, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
+    QTabWidget,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -199,6 +201,76 @@ def swatch(rgb, size=14):
     return QIcon(pm)
 
 
+class ColorPicker(QFrame):
+    """조각 색 고르기 팝업. 상단 고정(지금 상태·비우기·새 레이어) + 한 열 색 목록(최대 높이 안에서 스크롤)."""
+    MAX_H = 420
+
+    def __init__(self, parent, current, entries, can_clear):
+        super().__init__(parent, Qt.Popup)
+        self.setObjectName("picker")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.choice = False
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 6, 4, 4)
+        lay.setSpacing(2)
+        head = label(f"지금: {current}", "pickerHead")
+        lay.addWidget(head)
+        for text, data, enabled in (("칠하지 않음 (비우기)", "clear", can_clear), ("새 레이어…", "new", True)):
+            btn = QPushButton(text)
+            btn.setObjectName("pickerItem")
+            btn.setEnabled(enabled)
+            btn.clicked.connect(lambda _=False, d=data: self.done(d))
+            lay.addWidget(btn)
+        line = QFrame()
+        line.setObjectName("pickerLine")
+        line.setFixedHeight(1)
+        lay.addWidget(line)
+        self.list = QListWidget()
+        self.list.setObjectName("pickerList")
+        self.list.setIconSize(QSize(14, 14))
+        self.list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        for text, rgb, data, enabled in entries:
+            it = QListWidgetItem(swatch(rgb), text)
+            it.setData(Qt.UserRole, data)
+            if not enabled:
+                it.setFlags(Qt.NoItemFlags)  # 지금 색은 흐리게, 고를 수 없게
+            self.list.addItem(it)
+        self.list.itemClicked.connect(lambda it: self.done(it.data(Qt.UserRole)))
+        lay.addWidget(self.list)
+        # 목록 높이: 항목 수만큼, 전체가 MAX_H를 넘지 않게
+        row_h = 30
+        top_h = lay.sizeHint().height() - self.list.sizeHint().height()
+        self.list.setFixedHeight(max(row_h, min(len(entries) * row_h + 6, self.MAX_H - top_h - 10)))
+        self.setFixedWidth(230)
+
+    def done(self, data):
+        self.choice = data
+        self.close()
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(e)
+
+    def pick(self, pos):
+        """pos(전역 좌표) 근처에 띄우고 고를 때까지 기다린다. → 고른 값, 취소면 False"""
+        self.adjustSize()
+        screen = QApplication.screenAt(pos) or QApplication.primaryScreen()
+        area = screen.availableGeometry()
+        x = min(pos.x(), area.right() - self.width())
+        y = min(pos.y(), area.bottom() - self.height())
+        self.move(max(area.left(), x), max(area.top(), y))
+        loop = QEventLoop()
+        self.destroyed.connect(loop.quit)
+        self.setAttribute(Qt.WA_DeleteOnClose, False)
+        self.show()
+        while self.isVisible():
+            loop.processEvents(QEventLoop.WaitForMoreEvents)
+        return self.choice
+
+
 class MainWindow(QMainWindow):
     ai_test_done = Signal(bool, str)
     repaint_done = Signal(int, object, str)
@@ -222,13 +294,30 @@ class MainWindow(QMainWindow):
         outer.setSpacing(style.GAP)
         outer.addLayout(self.build_header())
 
-        body = QHBoxLayout()
-        body.setSpacing(style.GAP)
-        body.addWidget(self.build_left(), 3)
-        body.addWidget(self.build_right(), 2)
-        outer.addLayout(body, 1)
+        # 왼쪽(파일·로그)과 오른쪽(미리보기·설정) 사이 간격을 끌어 폭을 조절한다
+        self.split = QSplitter(Qt.Horizontal)
+        self.split.setHandleWidth(style.GAP)
+        self.split.setChildrenCollapsible(False)
+        self.split.addWidget(self.build_left())
+        self.split.addWidget(self.build_right())
+        self.split.setStretchFactor(0, 3)
+        self.split.setStretchFactor(1, 2)
+        if self.settings.value("split"):
+            self.split.restoreState(self.settings.value("split"))
+        outer.addWidget(self.split, 1)
         self.setCentralWidget(root)
         self.update_summary()
+
+        # 미리보기 이동: 키보드(+ - 0), 트랙패드 핀치, 스페이스를 누른 채 드래그
+        for keys, act in ((("+", "="), lambda: self.set_zoom(self.zoom * 1.25)),
+                          (("-",), lambda: self.set_zoom(self.zoom / 1.25)),
+                          (("0",), lambda: self.set_zoom(1.0))):
+            for k in keys:
+                QShortcut(QKeySequence(k), self, act)
+        self.space_down = False
+        self.drag_from = None  # (마우스 전역 위치, 가로 스크롤, 세로 스크롤)
+        self.preview.installEventFilter(self)
+        QApplication.instance().installEventFilter(self)
 
     # ---- 화면 구성 ----
     def build_header(self):
@@ -964,12 +1053,56 @@ class MainWindow(QMainWindow):
         h.setValue(round(fx * self.preview.width() - ax))
         v.setValue(round(fy * self.preview.height() - ay))
 
+    def typing(self):
+        """글자를 입력하는 칸에 포커스가 있으면 단축키·스페이스 이동을 쓰지 않는다."""
+        w = QApplication.focusWidget()
+        return isinstance(w, (QLineEdit, QSpinBox, QPlainTextEdit)) or (isinstance(w, QComboBox) and w.isEditable())
+
+    def over_preview(self):
+        return self.preview_pix is not None and self.scroll.isVisible() and \
+            self.scroll.rect().contains(self.scroll.mapFromGlobal(QCursor.pos()))
+
     def eventFilter(self, obj, e):
-        if obj is self.scroll.viewport() and e.type() == QEvent.Wheel and \
-                e.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):
-            step = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
-            self.set_zoom(self.zoom * step, e.position())
-            return True
+        t = e.type()
+        # 스페이스를 누르고 있는 동안 미리보기를 손으로 잡아 이동한다
+        if t in (QEvent.KeyPress, QEvent.KeyRelease) and e.key() == Qt.Key_Space and not e.isAutoRepeat():
+            if t == QEvent.KeyPress and not self.typing() and self.over_preview():
+                self.space_down = True
+                self.preview.setCursor(Qt.OpenHandCursor)
+                return True
+            if t == QEvent.KeyRelease and self.space_down:
+                self.space_down = False
+                self.drag_from = None
+                self.update_edit_bar()  # 손 모양을 원래 커서로 되돌린다
+                return True
+        if obj is self.preview and self.space_down:
+            if t == QEvent.MouseButtonPress:
+                h, v = self.scroll.horizontalScrollBar(), self.scroll.verticalScrollBar()
+                self.drag_from = (e.globalPosition(), h.value(), v.value())
+                self.preview.setCursor(Qt.ClosedHandCursor)
+                return True  # 이동 중에는 클릭 수정 메뉴를 띄우지 않는다
+            if t == QEvent.MouseMove and self.drag_from:
+                start, hx, vy = self.drag_from
+                d = e.globalPosition() - start
+                self.scroll.horizontalScrollBar().setValue(round(hx - d.x()))
+                self.scroll.verticalScrollBar().setValue(round(vy - d.y()))
+                return True
+            if t == QEvent.MouseButtonRelease:
+                self.drag_from = None
+                self.preview.setCursor(Qt.OpenHandCursor)
+                return True
+        if obj in (self.scroll.viewport(), self.preview):
+            # ⌘(Ctrl)+스크롤 확대·축소
+            if t == QEvent.Wheel and e.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):
+                step = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
+                pos = self.scroll.viewport().mapFromGlobal(e.globalPosition().toPoint())
+                self.set_zoom(self.zoom * step, pos)
+                return True
+            # 트랙패드 핀치 확대·축소 (macOS)
+            if t == QEvent.NativeGesture and e.gestureType() == Qt.ZoomNativeGesture:
+                pos = self.scroll.viewport().mapFromGlobal(e.globalPosition().toPoint())
+                self.set_zoom(self.zoom * (1 + e.value()), pos)
+                return True
         return super().eventFilter(obj, e)
 
     def resizeEvent(self, e):
@@ -1017,24 +1150,12 @@ class MainWindow(QMainWindow):
             nth[name] = nth.get(name, 0) + 1
             labels[(name, rgb)] = f"{name} {nth[name]}" if count[name] > 1 else name
 
-        menu = QMenu(self)
-        cur_label = labels.get((st["keys"][cur][0], tuple(int(v) for v in st["keys"][cur][1]))) if cur >= 0 else None
-        head = menu.addAction(f"지금: {cur_label or '칠하지 않음'}")
-        head.setEnabled(False)
-        menu.addSeparator()
-        for name, rgb, _ in entries:
-            act = menu.addAction(swatch(rgb), f"{labels[(name, rgb)]}   #{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}")
-            act.setData([name, list(rgb)])
-            if (name, rgb) == ((st["keys"][cur][0], tuple(int(v) for v in st["keys"][cur][1])) if cur >= 0 else None):
-                act.setEnabled(False)  # 지금 색은 고를 필요가 없다
-        menu.addSeparator()
-        clear = menu.addAction("칠하지 않음 (비우기)")
-        clear.setData("clear")
-        clear.setEnabled(cur >= 0)
-        menu.addAction("새 레이어…").setData("new")
-        chosen = menu.exec(QCursor.pos())
-        data = chosen.data() if chosen else None
-        if data is None:
+        cur_key = (st["keys"][cur][0], tuple(int(v) for v in st["keys"][cur][1])) if cur >= 0 else None
+        cur_label = labels.get(cur_key) if cur_key else None
+        items = [(f"{labels[(name, rgb)]}   #{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}", rgb, [name, list(rgb)],
+                  (name, rgb) != cur_key) for name, rgb, _ in entries]
+        data = ColorPicker(self, cur_label or "칠하지 않음", items, cur >= 0).pick(QCursor.pos())
+        if data is None or data is False:
             return False
         if data == "clear":
             return None, None
@@ -1118,6 +1239,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         self.save_settings()
+        self.settings.setValue("split", self.split.saveState())
         if self.thread and self.thread.isRunning():
             self.request_stop()
             self.thread.wait()
