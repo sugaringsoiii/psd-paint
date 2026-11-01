@@ -41,6 +41,7 @@ PROMPT = """웹툰 밑색 작업이다. 이미지 두 묶음을 준다.
 - 피부(얼굴·목·귀·손·팔·다리)는 레퍼런스에 없는 인물(엑스트라)이어도 반드시 피부 팔레트를 고른다. 피부를 none으로 두면 회색으로 칠해진다.
 - 레퍼런스에 없는 인물의 머리카락·옷·사물이거나 판단이 서지 않으면 "none"을 고른다. 억지로 고르지 않는다.
 - 배경(하늘·벽·바닥 등)은 "none"이다.
+- 지도에서 바탕색이 같은 번호들은 선이 끊긴 틈으로 이어진 한 덩어리다 (옷 주름선 등으로 나뉜 같은 옷·같은 머리일 가능성이 크다). 특별한 이유가 없으면 같은 팔레트를 고른다. 단, 머리카락과 얼굴처럼 묶음 안에서도 부위가 분명히 다르면 따로 고른다.
 - 지도의 모든 숫자에 대해 하나씩 답한다.
 {palette_note}
 팔레트: {palette_list}
@@ -54,7 +55,7 @@ REVIEW_PROMPT = """웹툰 밑색 검수다. 이미지 두 묶음을 준다.
 할 일: 레퍼런스와 비교해 잘못 칠한 번호만 고친다.
 - 같은 인물인데 머리·옷 색이 레퍼런스와 다른 곳 (인물을 헷갈려 색이 서로 바뀐 경우 포함)
 - 피부(얼굴·목·귀·손·팔·다리)가 피부 팔레트가 아닌 곳. 엑스트라도 피부는 피부 팔레트다
-- 머리카락·옷 덩어리 안에서 한 조각만 다른 색인 곳
+- 머리카락·옷 덩어리 안에서 한 조각만 다른 색인 곳 (주름선으로 나뉜 조각은 같은 옷이다)
 - 배경인데 칠한 곳은 none
 
 먼저 analysis에 무엇이 틀렸는지 짧게 적고, assignments에는 고칠 번호만 새 팔레트로 적는다. 맞는 번호는 적지 않는다.
@@ -74,6 +75,8 @@ class Job:
     schema: dict
     usage: dict = field(default_factory=dict)
     palette_text: str = ""
+    groups: np.ndarray = None   # 지도 번호 순서의 묶음 id (선이 끊겨 이어진 영역끼리 같다)
+    areas: np.ndarray = None    # 지도 번호 순서의 영역 넓이
 
 
 def _font(size):
@@ -103,17 +106,33 @@ def _pole(mask):
     return int(x), int(y)
 
 
-def build_map(labels, boundary, cand_ids, colors=None):
+def region_groups(labels, boundary, cand_ids):
+    """선이 끊겨 원래 이어져 있던 영역끼리 묶는다 (옷 주름선 등으로 나뉜 같은 덩어리). → 번호 순서의 묶음 id
+
+    영역은 끊긴 선을 메운 뒤 나눈 것이다. 메우기 전 선화로 다시 나누면 끊긴 틈으로 이어진 영역이 한 덩어리가 된다.
+    """
+    coarse, _ = ndimage.label(~boundary)
+    of = np.zeros(labels.max() + 1, np.int64)
+    m = labels > 0
+    of[labels[m]] = coarse[m]
+    return of[cand_ids]
+
+
+def build_map(labels, boundary, cand_ids, colors=None, groups=None):
     """원고 지도: 칠할 영역마다 색과 번호. → (이미지 목록, 지도 번호 → 영역 번호 배열)
 
-    colors가 없으면 영역마다 옅은 임의의 색을, 있으면 그 색(번호 순서, 칠한 결과)을 쓴다.
+    colors가 없으면 묶음(groups)마다 옅은 임의의 색을 쓴다. 같은 묶음은 같은 바탕색이 된다.
+    colors가 있으면 그 색(번호 순서, 칠한 결과)을 쓴다.
     """
     h, w = labels.shape
     lut = np.zeros(labels.max() + 1, np.int32)
     lut[cand_ids] = np.arange(1, len(cand_ids) + 1)
     kmap = lut[labels]
     if colors is None:
-        colors = np.random.default_rng(0).integers(175, 245, (len(cand_ids), 3))
+        if groups is None:
+            groups = np.arange(len(cand_ids))
+        _, gidx = np.unique(groups, return_inverse=True)
+        colors = np.random.default_rng(0).integers(175, 245, (gidx.max() + 1, 3))[gidx]
     tint = np.vstack([[255, 255, 255], colors]).astype(np.uint8)
     rgb = tint[kmap]
     rgb[boundary] = 0
@@ -214,7 +233,8 @@ def palette_from_image(rgba, quantize, tol, min_share):
 
 
 def make_job(labels, boundary, cand_ids, ref_rgb, palette, masks):
-    map_images, cands = build_map(labels, boundary, cand_ids)
+    groups = region_groups(labels, boundary, cand_ids)
+    map_images, cands = build_map(labels, boundary, cand_ids, groups=groups)
     ref_images = build_reference(ref_rgb, masks, palette)
     ids = [p["id"] for p in palette]
     named = all(p["name"] for p in palette)
@@ -236,7 +256,9 @@ def make_job(labels, boundary, cand_ids, ref_rgb, palette, masks):
             "properties": {"palette": {"type": "string", "enum": ids}, "layer": {"type": "string"}},
             "required": ["palette", "layer"], "additionalProperties": False}}
     schema = {"type": "object", "properties": props, "required": list(props), "additionalProperties": False}
-    return Job(cands, palette, ref_images, map_images, prompt, schema, palette_text=palette_list)
+    areas = np.bincount(labels.ravel(), minlength=labels.max() + 1)[cand_ids]
+    return Job(cands, palette, ref_images, map_images, prompt, schema, palette_text=palette_list,
+               groups=groups, areas=areas)
 
 
 def _b64(img):
@@ -384,7 +406,8 @@ def review_job(job, labels, boundary, answer):
     schema = {k: v for k, v in job.schema.items()}
     schema["properties"] = {k: v for k, v in job.schema["properties"].items() if k != "layer_names"}
     schema["required"] = list(schema["properties"])
-    return Job(job.candidates, job.palette, job.ref_images, maps, prompt, schema, palette_text=job.palette_text)
+    return Job(job.candidates, job.palette, job.ref_images, maps, prompt, schema, palette_text=job.palette_text,
+               groups=job.groups, areas=job.areas)
 
 
 def merge_review(answer, review):
@@ -415,6 +438,31 @@ def save_job(job, folder):
         "답은 schema.json 형식의 JSON으로 이 폴더의 answer.json에 저장한다.\n"
         "저장한 뒤 psd-paint에서 같은 파일을 다시 실행하면 답을 적용한다.\n")
     return folder
+
+
+def fill_group_gaps(job, answer, share=0.6):
+    """묶음 안에서 none으로 남은 조각은, 묶음 넓이의 share 이상을 차지한 팔레트를 따른다."""
+    if job.groups is None:
+        return answer
+    pick = {item["region"]: item["palette"] for item in answer.get("assignments", [])}
+    k_all = np.arange(1, len(job.candidates))
+    for g in np.unique(job.groups):
+        members = k_all[job.groups == g]
+        if len(members) < 2:
+            continue
+        area = {}
+        for k in members:
+            p = pick.get(int(k), "none")
+            if p != "none":
+                area[p] = area.get(p, 0) + int(job.areas[k - 1])
+        if not area:
+            continue
+        top, top_area = max(area.items(), key=lambda kv: kv[1])
+        if top_area >= share * job.areas[members - 1].sum():
+            for k in members:
+                if pick.get(int(k), "none") == "none":
+                    pick[int(k)] = top
+    return {**answer, "assignments": [{"region": k, "palette": p} for k, p in sorted(pick.items())]}
 
 
 def apply_answer(job, answer, n_regions):

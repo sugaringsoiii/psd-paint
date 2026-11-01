@@ -553,6 +553,7 @@ def ai_match(mismatch, labels, n, boundary, frame, opts, out_path, say):
         folder = Path(out_path).with_name(Path(out_path).stem + "_AI매칭")
         match.save_job(job, folder)
         (folder / "answer.json").write_text(json.dumps(answer, ensure_ascii=False, indent=1))
+    answer = match.fill_group_gaps(job, answer)
     # 칠한 결과 지도(번호 + 칠한 색)를 남긴다. 사람이나 MCP 클라이언트의 AI가 보고 검수한다
     folder = Path(out_path).with_name(Path(out_path).stem + "_AI매칭")
     folder.mkdir(parents=True, exist_ok=True)
