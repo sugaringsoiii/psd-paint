@@ -10,13 +10,15 @@ from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QObject, QRectF, QSettings, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QFileDialog, QFormLayout,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QRadioButton, QScrollArea, QSpinBox, QSplitter, QTabWidget,
+    QProgressBar, QPushButton, QRadioButton, QScrollArea, QSpinBox, QTabWidget,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import style
+import threading
+
+from . import ai, style
 from .cli import output_path
 from .core import Options, PaintError, paint
 
@@ -143,7 +145,7 @@ class FileList(QTreeWidget):
         pen = QPen(QColor(style.ACCENT if self.dragging else style.BORDER_HI))
         pen.setStyle(Qt.DashLine)
         p.setPen(pen)
-        p.setBrush(QColor(30, 32, 48, 120) if self.dragging else Qt.NoBrush)
+        p.setBrush(QColor(style.ACCENT_SOFT) if self.dragging else Qt.NoBrush)
         p.drawRoundedRect(r, 10, 10)
         if not self.topLevelItemCount():
             p.setPen(QColor(style.TEXT))
@@ -160,6 +162,8 @@ class FileList(QTreeWidget):
 
 
 class MainWindow(QMainWindow):
+    ai_test_done = Signal(bool, str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("psd-paint")
@@ -174,16 +178,15 @@ class MainWindow(QMainWindow):
         root = QWidget()
         root.setObjectName("root")
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(18, 16, 18, 18)
-        outer.setSpacing(14)
+        outer.setContentsMargins(20, 16, 20, 20)
+        outer.setSpacing(style.GAP)
         outer.addLayout(self.build_header())
 
-        split = QSplitter()
-        split.setChildrenCollapsible(False)
-        split.addWidget(self.build_left())
-        split.addWidget(self.build_right())
-        split.setSizes([700, 460])
-        outer.addWidget(split, 1)
+        body = QHBoxLayout()
+        body.setSpacing(style.GAP)
+        body.addWidget(self.build_left(), 3)
+        body.addWidget(self.build_right(), 2)
+        outer.addLayout(body, 1)
         self.setCentralWidget(root)
         self.update_summary()
 
@@ -247,7 +250,7 @@ class MainWindow(QMainWindow):
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(12)
+        v.setSpacing(style.GAP)
         v.addWidget(files_card, 1)
         v.addWidget(log_card)
         return w
@@ -260,6 +263,7 @@ class MainWindow(QMainWindow):
         self.preview.setObjectName("muted")
         self.preview.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.scroll = QScrollArea()
+        self.scroll.setObjectName("preview")
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll.setWidget(self.preview)
@@ -293,6 +297,35 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 8, 0, 0)
         v.setSpacing(14)
+
+        # 참고(레퍼런스) 방식
+        self.src_layer = QRadioButton("파일 안 참고 레이어")
+        self.src_layer.setToolTip("PSD 안의 '참고' 폴더(점·낙서 힌트) 또는 칠해 둔 '참고' 레이어를 봅니다.\n"
+                                  "없으면 PSD 옆의 '파일이름_참고.png'를 찾고, 그것도 없으면 자동으로 칠합니다")
+        self.src_image = QRadioButton("레퍼런스 이미지 (PNG·JPG)")
+        self.src_psd = QRadioButton("레퍼런스 PSD")
+        self.src_psd.setToolTip("밑색이 칠해진 PSD. 그 안의 '밑색'(또는 '참고') 폴더 레이어 이름과 색을 그대로 씁니다")
+        src_group = QButtonGroup(w)
+        for b in (self.src_layer, self.src_image, self.src_psd):
+            src_group.addButton(b)
+        {"image": self.src_image, "psd": self.src_psd}.get(s.value("hint_source", "layer"), self.src_layer).setChecked(True)
+        self.hint_path = QLineEdit(s.value("hint_path", ""))
+        self.hint_path.setPlaceholderText("레퍼런스 파일")
+        self.hint_browse = QPushButton("찾기")
+        self.hint_browse.clicked.connect(self.pick_hint_path)
+        ref_row = QHBoxLayout()
+        ref_row.addWidget(self.hint_path)
+        ref_row.addWidget(self.hint_browse)
+        ref_note = label("레퍼런스 이미지·PSD는 같은 페이지(같은 크기)를 칠한 것이어야 합니다. "
+                         "다른 페이지를 보고 칠하는 기능은 AI 연결로 준비 중입니다.", "summary")
+        ref_note.setWordWrap(True)
+        v.addWidget(label("참고 방식", "section"))
+        for b in (self.src_layer, self.src_image, self.src_psd):
+            v.addWidget(b)
+            b.toggled.connect(self.update_ref_enabled)
+        v.addLayout(ref_row)
+        v.addWidget(ref_note)
+        self.update_ref_enabled()
 
         # 결과 위치
         self.same_dir = QRadioButton("원본과 같은 폴더")
@@ -361,6 +394,37 @@ class MainWindow(QMainWindow):
         f3.addRow("선 틈 닫기", self.gap)
         v.addWidget(label("칠하기", "section"))
         v.addLayout(f3)
+
+        # AI 연결
+        self.provider = QComboBox()
+        for pid, info in ai.PROVIDERS.items():
+            self.provider.addItem(info["label"], pid)
+        self.provider.setCurrentIndex(max(0, self.provider.findData(s.value("provider", "claude"))))
+        self.model = QLineEdit()
+        self.api_key = QLineEdit()
+        self.api_key.setEchoMode(QLineEdit.Password)
+        self.api_key.setPlaceholderText("API 키 (OS 키체인에 저장)")
+        self.test_btn = QPushButton("연결 테스트")
+        self.test_btn.clicked.connect(self.test_ai)
+        self.ai_status = label("", "summary")
+        self.ai_status.setWordWrap(True)
+        self.provider.currentIndexChanged.connect(self.load_provider)
+        self.api_key.editingFinished.connect(self.save_api_key)
+        key_row = QHBoxLayout()
+        key_row.addWidget(self.api_key)
+        key_row.addWidget(self.test_btn)
+        f4 = QFormLayout()
+        f4.addRow("제공자", self.provider)
+        f4.addRow("모델", self.model)
+        f4.addRow("API 키", key_row)
+        f4.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        f4.setHorizontalSpacing(14)
+        f4.setVerticalSpacing(8)
+        v.addWidget(label("AI 연결 (선택)", "section"))
+        v.addLayout(f4)
+        v.addWidget(self.ai_status)
+        self.ai_test_done.connect(self.on_ai_test)
+        self.load_provider()
         v.addStretch()
 
         for form in (f1, f2, f3):
@@ -388,6 +452,12 @@ class MainWindow(QMainWindow):
         s.setValue("max_layers", self.max_layers.value())
         s.setValue("offset", self.offset.value())
         s.setValue("gap", self.gap.value())
+        s.setValue("hint_source", self.hint_source())
+        s.setValue("hint_path", self.hint_path.text())
+        pid = self.provider.currentData()
+        s.setValue("provider", pid)
+        s.setValue(f"model_{pid}", self.model.text())
+        self.save_api_key()
 
     def options(self):
         def patterns(edit):
@@ -395,6 +465,8 @@ class MainWindow(QMainWindow):
         return Options(
             line_group=self.line_group.text().strip() or "선화",
             hint_group=self.hint_group.text().strip() or "참고",
+            hint_source=self.hint_source(),
+            hint_path=self.hint_path.text().strip(),
             extra_boundary=patterns(self.boundary),
             background=patterns(self.background),
             hide_background=self.hide_bg.isChecked(),
@@ -403,6 +475,51 @@ class MainWindow(QMainWindow):
             offset_px=self.offset.value(),
             gap_close_px=self.gap.value(),
         )
+
+    def hint_source(self):
+        return "image" if self.src_image.isChecked() else "psd" if self.src_psd.isChecked() else "layer"
+
+    def update_ref_enabled(self):
+        on = not self.src_layer.isChecked()
+        self.hint_path.setEnabled(on)
+        self.hint_browse.setEnabled(on)
+
+    def pick_hint_path(self):
+        filt = "이미지 (*.png *.jpg *.jpeg *.webp)" if self.src_image.isChecked() else "Photoshop (*.psd)"
+        path, _ = QFileDialog.getOpenFileName(self, "레퍼런스 파일", self.hint_path.text(), filt)
+        if path:
+            self.hint_path.setText(path)
+
+    # ---- AI 연결 ----
+    def load_provider(self):
+        pid = self.provider.currentData()
+        self.model.setText(self.settings.value(f"model_{pid}", ai.PROVIDERS[pid]["model"]))
+        self.model.setPlaceholderText("모델 이름")
+        self.api_key.setText(ai.get_key(pid))
+        self.ai_status.setText("")
+        self._loaded_provider = pid
+
+    def save_api_key(self):
+        pid = getattr(self, "_loaded_provider", None)
+        if pid:
+            try:
+                ai.set_key(pid, self.api_key.text().strip())
+            except Exception as e:  # 키체인을 쓸 수 없는 환경
+                self.ai_status.setText(f"키를 저장하지 못했습니다: {e}")
+
+    def test_ai(self):
+        self.save_api_key()
+        self.test_btn.setEnabled(False)
+        self.ai_status.setObjectName("summary")
+        self.ai_status.setText("확인 중…")
+        args = (self.provider.currentData(), self.api_key.text().strip(), self.model.text().strip())
+        threading.Thread(target=lambda: self.ai_test_done.emit(*ai.test_connection(*args)), daemon=True).start()
+
+    def on_ai_test(self, ok, msg):
+        self.test_btn.setEnabled(True)
+        self.ai_status.setObjectName("ok" if ok else "fail")
+        self.ai_status.setStyleSheet("")  # objectName 바뀐 스타일 다시 적용
+        self.ai_status.setText(("✓ " if ok else "✕ ") + msg)
 
     def pick_out_dir(self):
         d = QFileDialog.getExistingDirectory(self, "결과 폴더", self.out_dir.text())

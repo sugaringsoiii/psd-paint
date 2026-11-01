@@ -15,6 +15,8 @@ from . import psdio
 class Options:
     line_group: str = "선화"            # 선화 레이어가 든 폴더 이름
     hint_group: str = "참고"            # 힌트 폴더(또는 레이어) 이름
+    hint_source: str = "layer"          # 힌트 출처: layer(파일 안 참고 레이어) · image(레퍼런스 이미지) · psd(레퍼런스 PSD)
+    hint_path: str = ""                 # image·psd 방식의 레퍼런스 파일 경로
     extra_boundary: list = field(default_factory=lambda: ["컷*", "*테두리*"])  # 경계로 쓸 픽셀 레이어 이름 패턴
     output_group: str = "밑색"
     gap_close_px: int = 2       # 선을 이만큼 두껍게 해서 작은 틈을 막는다
@@ -31,6 +33,9 @@ class Options:
     bg_contact: float = 0.4     # 둘레의 이 비율 이상이 컷 테두리에 닿은 힌트 없는 영역은 배경으로 본다
     max_layers: int = 10        # 밑색 레이어 수 상한 (0 = 제한 없음). 넘으면 작은 레이어부터 '기타'로 합친다
     other_layer: str = "기타"
+    color_tol: int = 12         # 칠한 예시 이미지에서 이 차이 안의 색은 같은 색으로 묶는다 (0~255)
+    dense_min_cover: float = 0.3  # 칠한 예시·레퍼런스 PSD에서 영역의 이 비율 이상을 덮은 색만 힌트로 본다
+    color_min_share: float = 0.0005  # 이보다 드문 색은 묶음을 만들지 않는다 (선 가장자리 등)
     background: list = field(default_factory=lambda: ["배경*", "*background*", "BG*", "bg*"])  # 배경 레이어·폴더 이름 패턴
     hide_background: bool = True  # 결과 PSD에서 배경 레이어·폴더를 끈다
 
@@ -55,27 +60,65 @@ def _disk(r):
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
 
 
-def read_hints(psd, opts):
-    """힌트 레이어 → (힌트 키 맵, 키별 (레이어 이름, RGB), 레이어 이름 순서(위→아래)).
+SIDECAR_SUFFIXES = ("_참고", ".참고", "_ref", "-ref")
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
-    폴더면 하위 레이어 이름이 밑색 레이어 이름이 된다. 레이어 하나면 색마다 레이어를 나눈다.
+
+def find_sidecar(psd_path):
+    """PSD 옆에 놓인 참고 이미지 (예: 1화.psd → 1화_참고.png)."""
+    p = Path(psd_path)
+    for suf in SIDECAR_SUFFIXES:
+        for ext in IMAGE_EXTS:
+            cand = p.with_name(p.stem + suf + ext)
+            if cand.exists():
+                return cand
+    return None
+
+
+def load_sidecar(path, psd):
+    """참고 이미지를 캔버스 크기 RGBA로. 크기가 다르면 캔버스에 맞춰 늘린다."""
+    im = Image.open(path).convert("RGBA")
+    if im.size != (psd.width, psd.height):
+        im = im.resize((psd.width, psd.height), Image.NEAREST)
+    return np.asarray(im).copy()
+
+
+def quantize(rgb, tol, min_share):
+    """칠한 예시 이미지의 비슷한 색(브러시 결, 안티에일리어싱)을 대표색으로 묶는다.
+
+    → (픽셀별 대표색 번호, 대표색 RGB 목록). 아주 드문 색은 -1.
     """
-    key_map = np.full((psd.height, psd.width), -1, np.int32)
-    hint = psdio.find(psd, opts.hint_group)
-    if hint is None:
-        if opts.auto_fill:
-            return key_map, [], []
-        raise PaintError(f"'{opts.hint_group}' 힌트 폴더나 레이어가 없습니다")
-    if hint.is_group():
-        sources = [(layer.name, layer) for layer in hint if not layer.is_group()]
-    else:
-        sources = [(None, hint)]
-    if not sources and not opts.auto_fill:
-        raise PaintError(f"'{opts.hint_group}' 폴더 안에 힌트 레이어가 없습니다")
+    q = (rgb >> 3).astype(np.int32)
+    packed = (q[:, 0] << 10) | (q[:, 1] << 5) | q[:, 2]
+    bins, inverse, counts = np.unique(packed, return_inverse=True, return_counts=True)
+    centers = np.stack([(bins >> 10) & 31, (bins >> 5) & 31, bins & 31], 1) * 8 + 4
+    palette, bin_to = [], np.full(len(bins), -1)
+    for b in np.argsort(-counts):
+        c = centers[b]
+        if palette:
+            d = np.abs(np.array(palette) - c).max(1)
+            j = int(d.argmin())
+            if d[j] <= tol:
+                bin_to[b] = j
+                continue
+        if counts[b] < min_share * len(rgb):
+            continue
+        palette.append(c)
+        bin_to[b] = len(palette) - 1
+    idx = bin_to[inverse]
+    # 대표색은 묶인 픽셀의 중앙값으로 다시 잡는다
+    colors = [tuple(int(v) for v in np.median(rgb[idx == j], 0)) for j in range(len(palette))]
+    # 거의 흰색·검은색은 순수한 흰색·검은색으로 맞춘다
+    colors = [(255,) * 3 if min(c) >= 248 else (0,) * 3 if max(c) <= 7 else c for c in colors]
+    return idx, colors
 
-    keys = []
-    for name, layer in sources:  # 아래 레이어부터 칠해 위 레이어가 덮는다
-        rgba = psdio.canvas_rgba(layer, psd)
+
+def _folder_hints(group, src_psd, key_map, keys):
+    """폴더의 하위 레이어마다 이름과 색을 힌트로 읽는다. 아래 레이어부터 칠해 위 레이어가 덮는다."""
+    for layer in group:
+        if layer.is_group():
+            continue
+        rgba = psdio.canvas_rgba(layer, src_psd)
         solid = rgba[..., 3] >= 250
         if not solid.any():
             continue
@@ -83,11 +126,88 @@ def read_hints(psd, opts):
         colors, inverse = np.unique(packed[solid], return_inverse=True)
         base = len(keys)
         for c in colors:
-            rgb = ((c >> 16) & 255, (c >> 8) & 255, c & 255)
-            keys.append((name or f"색_{c:06X}", rgb))
+            keys.append((layer.name, ((c >> 16) & 255, (c >> 8) & 255, c & 255)))
         key_map[solid] = base + inverse
-    names_top_down = list(dict.fromkeys(n for n, _ in reversed(keys)))
-    return key_map, keys, names_top_down
+
+
+def _image_hints(rgba, opts, key_map):
+    """칠한 예시 이미지를 비슷한 색끼리 묶어 색마다 레이어를 나눈다."""
+    keys = []
+    solid = rgba[..., 3] >= 250
+    if solid.any():
+        idx, colors = quantize(rgba[..., :3][solid], opts.color_tol, opts.color_min_share)
+        sub = np.full(idx.shape, -1, np.int32)
+        sub[idx >= 0] = idx[idx >= 0]
+        key_map[solid] = sub
+        keys = [(f"색_{r:02X}{g:02X}{b:02X}", (r, g, b)) for r, g, b in colors]
+    return keys
+
+
+def _check_size(w, h, psd, what):
+    if (w, h) == (psd.width, psd.height):
+        return
+    if abs(w / h - psd.width / psd.height) > 0.01:
+        raise PaintError(f"{what} 크기({w}×{h})가 원고({psd.width}×{psd.height})와 다릅니다. "
+                         "같은 페이지를 칠한 레퍼런스만 쓸 수 있습니다")
+
+
+def read_hints(psd, opts, psd_path=None):
+    """참고 힌트 → (힌트 키 맵, 키별 (레이어 이름, RGB), 레이어 이름 순서(위→아래), 이미지 방식 여부).
+
+    opts.hint_source에 따라 힌트를 읽는다.
+    - "layer": 파일 안 참고 폴더(점·낙서, 하위 레이어 이름이 밑색 레이어 이름) 또는 참고 레이어 하나(칠한 예시).
+      둘 다 없으면 PSD 옆 참고 이미지(1화_참고.png)를 찾는다.
+    - "image": opts.hint_path의 PNG·JPG. 같은 페이지를 칠한 예시로 보고 비슷한 색끼리 묶는다.
+    - "psd": opts.hint_path의 레퍼런스 PSD. 그 안의 밑색(또는 참고) 폴더 레이어 이름과 색을 그대로 쓴다.
+    """
+    key_map = np.full((psd.height, psd.width), -1, np.int32)
+    keys = []
+    image_mode = False
+
+    if opts.hint_source == "image":
+        if not opts.hint_path or not Path(opts.hint_path).exists():
+            raise PaintError("레퍼런스 이미지를 지정하세요")
+        im = Image.open(opts.hint_path)
+        _check_size(*im.size, psd, "레퍼런스 이미지")
+        keys = _image_hints(load_sidecar(opts.hint_path, psd), opts, key_map)
+        image_mode = True
+    elif opts.hint_source == "psd":
+        if not opts.hint_path or not Path(opts.hint_path).exists():
+            raise PaintError("레퍼런스 PSD를 지정하세요")
+        ref = PSDImage.open(opts.hint_path)
+        _check_size(ref.width, ref.height, psd, "레퍼런스 PSD")
+        group = psdio.find(ref, opts.output_group, True) or psdio.find(ref, opts.hint_group, True)
+        if group is not None:
+            _folder_hints(group, ref, key_map, keys)
+        else:
+            # 밑색 폴더가 없으면 선화를 끈 합성 이미지를 칠한 예시로 쓴다
+            line = psdio.find(ref, opts.line_group, True)
+            with psdio.hidden([line] if line is not None else []):
+                rgba = np.asarray(ref.composite(force=True).convert("RGBA")).copy()
+            keys = _image_hints(rgba, opts, key_map)
+            image_mode = True
+    else:
+        hint = psdio.find(psd, opts.hint_group)
+        if hint is not None and hint.is_group():
+            _folder_hints(hint, psd, key_map, keys)
+            if not keys and not opts.auto_fill:
+                raise PaintError(f"'{opts.hint_group}' 폴더 안에 힌트가 없습니다")
+        elif hint is not None:
+            keys = _image_hints(psdio.canvas_rgba(hint, psd), opts, key_map)
+            image_mode = True
+        elif psd_path and (sidecar := find_sidecar(psd_path)):
+            keys = _image_hints(load_sidecar(sidecar, psd), opts, key_map)
+            image_mode = True
+        elif not opts.auto_fill:
+            raise PaintError(f"'{opts.hint_group}' 힌트 폴더·레이어나 참고 이미지가 없습니다")
+
+    if image_mode:
+        # 넓게 칠한 색부터 위에 둔다
+        area = np.bincount(key_map[key_map >= 0], minlength=len(keys))
+        names_top_down = [keys[k][0] for k in np.argsort(-area)]
+    else:
+        names_top_down = list(dict.fromkeys(n for n, _ in reversed(keys)))
+    return key_map, keys, names_top_down, image_mode
 
 
 def segment(psd, opts):
@@ -112,8 +232,12 @@ def segment(psd, opts):
     return line_group, boundary, frame, labels, n
 
 
-def assign_hints(labels, n, key_map, opts):
-    """영역마다 가장 많이 칠해진 힌트 키. 힌트가 없으면 -1."""
+def assign_hints(labels, n, key_map, opts, dense=False):
+    """영역마다 가장 많이 칠해진 힌트 키. 힌트가 없으면 -1.
+
+    dense(칠한 예시·레퍼런스)면 영역의 dense_min_cover 이상을 덮은 색만 인정한다.
+    선 아래로 넘친 칠이 배경 가장자리에 걸쳐도 배경을 칠하지 않게 하기 위해서다.
+    """
     region_key = np.full(n + 1, -1, np.int64)
     m = (key_map >= 0) & (labels > 0)
     if m.any():
@@ -125,14 +249,17 @@ def assign_hints(labels, n, key_map, opts):
         lab, key, counts = lab[order], key[order], counts[order]
         first = np.r_[True, lab[1:] != lab[:-1]]
         ok = first & (counts >= opts.min_hint_px)
+        if dense:
+            areas = np.bincount(labels.ravel(), minlength=n + 1)
+            ok &= counts >= opts.dense_min_cover * areas[lab]
         region_key[lab[ok]] = key[ok]
     return region_key
 
 
-def find_background(labels, n, frame, region_key, opts):
+def find_background(labels, n, frame, region_key, opts, unhinted=None):
     """힌트 없는 영역 중 배경으로 볼 영역. 컷마다 가장 큰 영역, 그리고 둘레 대부분이 컷 테두리에 닿은 영역."""
     areas = np.bincount(labels.ravel(), minlength=n + 1)
-    unhinted = region_key < 0
+    unhinted = (region_key < 0) if unhinted is None else unhinted.copy()
     unhinted[0] = False
     bg = np.zeros(n + 1, bool)
 
@@ -330,9 +457,14 @@ def paint(psd_path, out_path, opts=None, progress=None):
     say("선화 영역 나누는 중", 0.15)
     line_group, boundary, frame, labels, n = segment(psd, opts)
     say("참고 레이어 읽는 중", 0.3)
-    key_map, keys, names = read_hints(psd, opts)
+    key_map, keys, names, image_mode = read_hints(psd, opts, psd_path)
     say("영역에 힌트 대응하는 중", 0.4)
-    region_key = assign_hints(labels, n, key_map, opts)
+    region_key = assign_hints(labels, n, key_map, opts, dense=image_mode or opts.hint_source == "psd")
+    if image_mode:
+        # 칠한 예시 이미지는 배경도 흰색으로 칠해져 있다. 흰색 영역 중 배경으로 보이는 곳은 비운다
+        white = np.array([min(rgb) >= 245 for _, rgb in keys] + [False])
+        bg = find_background(labels, n, frame, region_key, opts, unhinted=(region_key < 0) | white[region_key])
+        region_key[bg] = -1
     hinted = int((region_key[1:] >= 0).sum())
     auto = 0
     if opts.auto_fill:

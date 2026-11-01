@@ -1,19 +1,23 @@
-"""앱 테마: 어두운 바탕에 보라 강조색을 쓰는 Linear 풍 스타일."""
+"""앱 테마: 밝은 바탕에 보라 강조색을 쓰는 Linear 풍 스타일."""
 
-BG = "#0F1012"
-PANEL = "#16171A"
-RAISED = "#1C1D21"
-BORDER = "#26282D"
-BORDER_HI = "#34363C"
-TEXT = "#E3E4E8"
-MUTED = "#8A8F98"
-FAINT = "#5C6068"
+BG = "#F4F5F7"
+PANEL = "#FFFFFF"
+RAISED = "#F7F8FA"
+HOVER = "#EFF0F3"
+BORDER = "#E4E6EA"
+BORDER_HI = "#D5D8DE"
+TEXT = "#1C1D21"
+MUTED = "#6B6F78"
+FAINT = "#A3A7AF"
 ACCENT = "#5E6AD2"
 ACCENT_HI = "#6F7AE0"
-SELECT = "#1E2030"
-OK = "#4CB782"
-FAIL = "#EB5757"
-WARN = "#F2C94C"
+ACCENT_SOFT = "#ECEEFB"
+SELECT = "#EEF0FB"
+OK = "#2F9E6B"
+FAIL = "#D64545"
+WARN = "#C98A00"
+
+GAP = 16  # 패널 사이 간격
 
 QSS = f"""
 * {{
@@ -32,48 +36,58 @@ QLabel#title {{ font-size: 16px; font-weight: 600; }}
 QLabel#subtitle, QLabel#muted {{ color: {MUTED}; }}
 QLabel#section {{ color: {MUTED}; font-size: 11px; font-weight: 600; letter-spacing: 0.5px; }}
 QLabel#summary {{ color: {MUTED}; font-size: 12px; }}
+QLabel#ok {{ color: {OK}; font-size: 12px; }}
+QLabel#fail {{ color: {FAIL}; font-size: 12px; }}
 
 QPushButton {{
-    background: {RAISED};
+    background: {PANEL};
     border: 1px solid {BORDER_HI};
     border-radius: 6px;
     padding: 6px 12px;
 }}
-QPushButton:hover {{ background: #23252A; }}
-QPushButton:pressed {{ background: #2A2C32; }}
-QPushButton:disabled {{ color: {FAINT}; border-color: {BORDER}; background: {PANEL}; }}
+QPushButton:hover {{ background: {HOVER}; }}
+QPushButton:pressed {{ background: {BORDER}; }}
+QPushButton:disabled {{ color: {FAINT}; border-color: {BORDER}; background: {RAISED}; }}
 QPushButton#primary {{
     background: {ACCENT};
-    border: 1px solid {ACCENT_HI};
+    border: 1px solid {ACCENT};
     color: white;
     font-weight: 600;
     padding: 7px 16px;
 }}
-QPushButton#primary:hover {{ background: {ACCENT_HI}; }}
-QPushButton#primary:disabled {{ background: #2C2F4A; border-color: #2C2F4A; color: #8C90B8; }}
+QPushButton#primary:hover {{ background: {ACCENT_HI}; border-color: {ACCENT_HI}; }}
+QPushButton#primary:disabled {{ background: #C5C9EE; border-color: #C5C9EE; color: white; }}
 QPushButton#ghost {{ background: transparent; border: none; color: {MUTED}; padding: 4px 8px; }}
-QPushButton#ghost:hover {{ color: {TEXT}; background: {RAISED}; }}
+QPushButton#ghost:hover {{ color: {TEXT}; background: {HOVER}; }}
 
-QLineEdit, QSpinBox {{
-    background: #111214;
+QLineEdit, QSpinBox, QComboBox {{
+    background: {PANEL};
     border: 1px solid {BORDER_HI};
     border-radius: 6px;
     padding: 5px 8px;
     selection-background-color: {ACCENT};
+    selection-color: white;
 }}
-QLineEdit:focus, QSpinBox:focus {{ border-color: {ACCENT}; }}
-QLineEdit:disabled, QSpinBox:disabled {{ color: {FAINT}; }}
+QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{ border-color: {ACCENT}; }}
+QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled {{ color: {FAINT}; background: {RAISED}; }}
 QSpinBox::up-button, QSpinBox::down-button {{ width: 14px; border: none; background: transparent; }}
+QComboBox::drop-down {{ border: none; width: 20px; }}
+QComboBox QAbstractItemView {{
+    background: {PANEL};
+    border: 1px solid {BORDER_HI};
+    selection-background-color: {SELECT};
+    selection-color: {TEXT};
+}}
 
 QCheckBox, QRadioButton {{ spacing: 8px; background: transparent; }}
 QCheckBox::indicator, QRadioButton::indicator {{
     width: 14px; height: 14px;
     border: 1px solid {BORDER_HI};
-    background: #111214;
+    background: {PANEL};
 }}
 QCheckBox::indicator {{ border-radius: 4px; }}
 QRadioButton::indicator {{ border-radius: 8px; }}
-QCheckBox::indicator:checked, QRadioButton::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT_HI}; }}
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
 
 QTreeWidget {{
     background: transparent;
@@ -82,7 +96,7 @@ QTreeWidget {{
 }}
 QTreeWidget::item {{ height: 34px; border-bottom: 1px solid {BORDER}; padding-left: 4px; }}
 QTreeWidget::item:selected {{ background: {SELECT}; color: {TEXT}; }}
-QTreeWidget::item:hover:!selected {{ background: #191A1E; }}
+QTreeWidget::item:hover:!selected {{ background: {RAISED}; }}
 QHeaderView {{ background: {PANEL}; border: none; }}
 QHeaderView::section {{
     background: {PANEL};
@@ -103,14 +117,14 @@ QPlainTextEdit {{
 }}
 QScrollArea {{ background: transparent; border: none; }}
 QScrollArea > QWidget > QWidget {{ background: transparent; }}
+QScrollArea#preview {{ background: {RAISED}; border: 1px solid {BORDER}; border-radius: 8px; }}
 
 QProgressBar {{
-    background: {RAISED};
+    background: {HOVER};
     border: none;
     border-radius: 2px;
     max-height: 4px;
     min-height: 4px;
-    text-align: right;
 }}
 QProgressBar::chunk {{ background: {ACCENT}; border-radius: 2px; }}
 
@@ -125,17 +139,15 @@ QTabBar::tab {{
     margin-right: 4px;
     border-radius: 6px;
 }}
-QTabBar::tab:selected {{ background: {RAISED}; color: {TEXT}; }}
+QTabBar::tab:selected {{ background: {HOVER}; color: {TEXT}; }}
 QTabBar::tab:hover:!selected {{ color: {TEXT}; }}
 
-QSplitter::handle {{ background: transparent; width: 10px; }}
 QScrollBar:vertical {{ background: transparent; width: 8px; margin: 2px; }}
-QScrollBar::handle:vertical {{ background: #2C2E34; border-radius: 3px; min-height: 30px; }}
-QScrollBar::handle:vertical:hover {{ background: #3A3D44; }}
+QScrollBar::handle:vertical {{ background: #D3D6DC; border-radius: 3px; min-height: 30px; }}
+QScrollBar::handle:vertical:hover {{ background: #BFC3CA; }}
 QScrollBar:horizontal {{ background: transparent; height: 8px; margin: 2px; }}
-QScrollBar::handle:horizontal {{ background: #2C2E34; border-radius: 3px; min-width: 30px; }}
+QScrollBar::handle:horizontal {{ background: #D3D6DC; border-radius: 3px; min-width: 30px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
-QToolTip {{ background: {RAISED}; color: {TEXT}; border: 1px solid {BORDER_HI}; padding: 6px; border-radius: 6px; }}
-QMessageBox {{ background: {PANEL}; }}
+QToolTip {{ background: {TEXT}; color: white; border: none; padding: 6px; border-radius: 6px; }}
 """
