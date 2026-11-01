@@ -69,6 +69,40 @@ AI에 묻는 방법은 두 가지다.
 .venv/bin/python -m psdpaint 1화_2.psd --ref-psd 1화_3_밑색.psd --ai files
 ```
 
+## MCP 서버 (구독으로 AI 매칭)
+
+Claude 데스크톱·Claude Code에 psd-paint를 커넥터로 붙이면 API 키 없이 쓸 수 있다. 다른 페이지 레퍼런스는 클라이언트의 AI가 지도 이미지를 보고 직접 영역을 맞춘다.
+
+| 도구 | 하는 일 |
+|---|---|
+| `inspect_psd` | 레이어 구조(폴더·레이어 이름, 숨김 여부)를 보여 준다 |
+| `paint_psd` | 밑색을 칠해 `원본이름_밑색.psd`로 저장하고 미리보기를 돌려준다. 다른 페이지 레퍼런스면 레퍼런스·번호 지도 이미지를 돌려준다 |
+| `apply_match` | AI가 고른 영역별 팔레트를 적용해 칠한다 |
+
+예: "이 PSD를 1화_3_밑색.psd 레퍼런스로 칠해 줘" → `paint_psd` → (AI가 이미지를 보고) `apply_match` → 완료
+
+### 등록
+
+Claude Code:
+
+```bash
+claude mcp add psd-paint -e PYTHONPATH=/절대경로/psd-paint -- /절대경로/psd-paint/.venv/bin/python -m psdpaint.mcp_server
+```
+
+Claude 데스크톱 (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "psd-paint": {
+      "command": "/절대경로/psd-paint/.venv/bin/python",
+      "args": ["-m", "psdpaint.mcp_server"],
+      "env": {"PYTHONPATH": "/절대경로/psd-paint"}
+    }
+  }
+}
+```
+
 ## AI 연결 (선택)
 
 앱 설정에서 제공자(Claude · OpenAI(Codex) · Gemini), 모델, API 키를 넣고 [연결 테스트]로 확인한다. 모델은 목록에서 고르거나 직접 입력하고, [목록 불러오기]로 키에서 쓸 수 있는 모델 이름을 받아 온다. 키는 OS 자격 증명 저장소(macOS 키체인, Windows 자격 증명 관리자)에 저장한다. 연결 테스트는 모델 정보만 조회해 토큰을 쓰지 않는다. AI 매칭의 'API로 바로 매칭'에 쓴다.
@@ -132,7 +166,7 @@ python3 -m venv .venv
 - [x] GUI 앱: 파일 여러 개 끌어 넣기, 진행 표시, 미리보기, 결과 파일·폴더 열기
 - [ ] macOS `.app`, Windows `.exe` 빌드 (GitHub Actions)
 - [x] AI 매칭: 다른 페이지·캐릭터 시트 레퍼런스 (Claude API, 요청 폴더)
-- [ ] MCP 서버: Claude 데스크톱·Claude Code에서 구독으로 AI 매칭
+- [x] MCP 서버: Claude 데스크톱·Claude Code에서 구독으로 AI 매칭
 
 ## 개발 도구
 

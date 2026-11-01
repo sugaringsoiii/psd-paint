@@ -8,3 +8,4 @@ anthropic>=2.0
 keyring>=25
 truststore>=0.10
 certifi
+mcp>=2.3
