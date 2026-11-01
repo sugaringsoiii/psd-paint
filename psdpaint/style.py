@@ -77,7 +77,15 @@ QLineEdit, QSpinBox, QComboBox {{
 QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{ border-color: {ACCENT}; }}
 QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled {{ color: {FAINT}; background: {RAISED}; }}
 QSpinBox::up-button, QSpinBox::down-button {{ width: 14px; border: none; background: transparent; }}
-QComboBox::drop-down {{ border: none; width: 20px; }}
+QComboBox {{ padding-right: 28px; }}
+QComboBox::drop-down {{
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    border: none;
+    width: 24px;
+}}
+QComboBox::down-arrow {{ image: url({ASSETS}/chevron-down.svg); width: 16px; height: 16px; }}
+QComboBox::down-arrow:on {{ top: 1px; }}
 QComboBox QAbstractItemView {{
     background: {PANEL};
     border: 1px solid {BORDER_HI};
