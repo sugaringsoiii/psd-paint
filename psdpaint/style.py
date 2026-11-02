@@ -99,6 +99,8 @@ QLineEdit, QSpinBox, QComboBox {{
     selection-color: white;
 }}
 QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{ border-color: {ACCENT}; }}
+QPlainTextEdit#guideEdit {{ background: {PANEL}; border: 1px solid {BORDER_HI}; border-radius: 6px; padding: 6px 8px; }}
+QPlainTextEdit#guideEdit:focus {{ border-color: {ACCENT}; }}
 QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled {{ color: {FAINT}; background: {RAISED}; }}
 QSpinBox {{ padding: 0; min-height: {INPUT_H - 2}px; max-height: {INPUT_H - 2}px; }}
 QSpinBox QLineEdit {{ padding: 0; border: none; background: transparent; min-height: 0; }}
