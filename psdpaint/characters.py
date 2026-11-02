@@ -1,14 +1,19 @@
-"""캐릭터 프리셋으로 칠하기.
+"""캐릭터 프리셋으로 칠하기. 색은 캐릭터 프리셋(색상 프리셋 '캐릭터/부위')에서 가져오므로 AI가 톤을 고르지 않는다.
 
-1. 이미지 모델(Gemini 나노 바나나)이 컷마다 선화를 두 번 칠한다: 부위별 코드 색, 사람별 코드 색.
-   이미지 모델은 위치를 그림으로 바로 내놓으므로 '이 칸이 머리카락'을 번호로 가리키는 것보다 정확하다.
-2. 우리 영역마다 칠해진 색을 다수결해 부위와 사람을 정한다.
-3. 글 AI가 사람마다 잘라 낸 선화를 보고 등록한 캐릭터 중 누구인지 고른다 (API, 또는 요청 폴더·MCP의 AI).
-4. 색은 캐릭터 프리셋(색상 프리셋 '캐릭터/부위')에서 가져온다. AI가 톤을 고르지 않으므로 흔들리지 않는다.
+부위 나누기는 두 가지다.
+- 이미지 지도(image): 이미지 모델(Gemini 나노 바나나)이 컷마다 부위별·사람별 코드 색으로 칠하고, 영역마다 다수결한다.
+  글 AI는 사람마다 잘라 낸 선화를 보고 누구인지만 고른다. 위치를 그림으로 바로 내놓으므로 가장 정확하다.
+- 영역 확인 칸(tiles): 영역마다 빨갛게 강조한 칸을 모아 보여 주고, 글 AI(Claude 등)가 칸마다 부위와 누구인지 답한다.
+  그림을 그리는 모델이 필요 없어 Claude만으로(MCP·구독) 쓸 수 있다.
+
+누구인지 알아볼 때는 캐릭터 프로필(대표 그림 + 생김새 설명)을 함께 보여 준다.
 """
 import base64
 import io
 import json
+import os
+import shutil
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -76,8 +81,52 @@ IDENTIFY_PROMPT = """웹툰 밑색 작업이다. [원고 인물]은 이번 페�
 {looks}"""
 
 
-def from_presets(presets, looks=None):
-    """색상 프리셋 [{"name": "하늘/머리", "rgb"}] + 생김새 {"하늘": "…"} → 캐릭터 [{"name", "look", "colors": {부위: rgb}}]"""
+def data_dir():
+    """앱 데이터 폴더 (캐릭터 프로필 그림을 둔다)."""
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    elif os.name == "nt":
+        base = Path(os.environ.get("APPDATA") or Path.home())
+    else:
+        base = Path.home() / ".local" / "share"
+    return base / "psd-paint"
+
+
+def load_profiles():
+    """캐릭터 프로필 [{"name", "look", "image": 그림 경로 또는 ""}]"""
+    path = data_dir() / "characters.json"
+    try:
+        items = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    out = []
+    for p in items:
+        if isinstance(p, dict) and str(p.get("name", "")).strip():
+            img = p.get("image") or ""
+            if img and not Path(img).is_absolute():
+                img = str(data_dir() / "characters" / img)
+            out.append({"name": p["name"].strip(), "look": p.get("look", ""), "image": img if img and Path(img).exists() else ""})
+    return out
+
+
+def save_profiles(profiles):
+    """캐릭터 프로필을 저장한다. 대표 그림은 앱 데이터 폴더로 복사해 원본 파일이 옮겨져도 남게 한다."""
+    folder = data_dir() / "characters"
+    folder.mkdir(parents=True, exist_ok=True)
+    items = []
+    for p in profiles:
+        img = p.get("image") or ""
+        if img and Path(img).exists() and Path(img).parent != folder:
+            dest = folder / f"{p['name']}{Path(img).suffix.lower() or '.png'}"
+            shutil.copyfile(img, dest)
+            img = str(dest)
+        items.append({"name": p["name"], "look": p.get("look", ""), "image": Path(img).name if img else ""})
+    (data_dir() / "characters.json").write_text(json.dumps(items, ensure_ascii=False, indent=1))
+
+
+def from_presets(presets, looks=None, profiles=None):
+    """색상 프리셋 [{"name": "하늘/머리", "rgb"}] + 생김새 {"하늘": "…"} + 프로필
+    → 캐릭터 [{"name", "look", "image", "colors": {부위: rgb}}]"""
     chars = {}
     for p in presets:
         name = p.get("name") or ""
@@ -86,10 +135,14 @@ def from_presets(presets, looks=None):
         who, word = (s.strip() for s in name.split("/", 1))
         part = PART_OF_WORD.get(word)
         if who and part:
-            chars.setdefault(who, {"name": who, "look": "", "colors": {}})["colors"][part] = tuple(p["rgb"])
+            chars.setdefault(who, {"name": who, "look": "", "image": "", "colors": {}})["colors"][part] = tuple(p["rgb"])
     for who, look in (looks or {}).items():
         if who.strip():
-            chars.setdefault(who.strip(), {"name": who.strip(), "look": "", "colors": {}})["look"] = look.strip()
+            chars.setdefault(who.strip(), {"name": who.strip(), "look": "", "image": "", "colors": {}})["look"] = look.strip()
+    for p in profiles or []:
+        c = chars.setdefault(p["name"], {"name": p["name"], "look": "", "image": "", "colors": {}})
+        c["look"] = p.get("look") or c["look"]
+        c["image"] = p.get("image") or ""
     return list(chars.values())
 
 
@@ -113,7 +166,7 @@ def from_app_settings():
         presets = json.loads(s.value("presets", "[]"))
     except (ValueError, TypeError):
         presets = []
-    return from_presets(presets, parse_looks(s.value("character_looks", "")))
+    return from_presets(presets, parse_looks(s.value("character_looks", "")), load_profiles())
 
 
 def page_chunks(content, gap=16):
@@ -441,3 +494,137 @@ def assign(part_of, person_of, who, chars, n, labels, background):
     order = [match.LAYER_OF_PART.get(p, p) for p in match.PARTS] + ["사물"]
     names = sorted({k[0] for k in keys}, key=lambda s: order.index(s) if s in order else len(order))
     return region_key, keys, names
+
+
+# ---- 영역 확인 칸 (그림 모델 없이 글 AI만으로) ----
+TILE_PARTS = BODY + ["사물", "배경"]
+TILE = 300                      # 칸 하나의 크기(px)
+TILE_COLS, TILE_ROWS = 5, 4
+TILE_PROMPT = """웹툰 밑색 작업이다.
+[레퍼런스]는 등록한 등장인물의 대표 그림이다. 순서대로 {names}이다.
+[영역 확인] 그림은 칸마다 선화 일부를 잘라 낸 것이고, 칸마다 영역 하나를 빨갛게 칠했다. 칸 위의 숫자가 칸 번호다.
+칸이 페이지 위에서 아래 순서라 이웃한 번호는 대개 같은 컷이다.
+칸마다 빨간 영역이 무엇인지 적는다.
+- part: {parts} 중 하나.
+- character: 그 몸이 누구인지 등장인물 이름. 등장인물이 아니거나(엑스트라) 판단이 서지 않으면 모름, 사물·배경이면 없음.
+판단 규칙:
+- 둘레의 선화(얼굴·눈·귀·머리 모양·머리띠·옷깃·손가락)를 보고 그 영역이 몸의 어디인지 판단한다. 영역 안의 선(머리카락 결, 옷 주름)도 단서다.
+- 사람 실루엣 안은 배경이 아니다. 머리카락 가닥 사이 좁은 틈은 머리카락, 손가락 사이로 보이는 얼굴은 피부다.
+- 실루엣 밖, 컷 안의 빈 바탕과 하늘·벽·바닥은 배경이다. 말풍선·효과선 안도 배경이다.
+- 손에 든 물건은 사물, 그 손은 피부다.
+- 같은 사람이 여러 칸에 나오면 같은 이름을 쓴다. 머리띠·머리 모양·귀걸이로 누구인지 알아본다.
+등장인물:
+{looks}
+칸 번호 1 ~ {count}를 모두 적는다."""
+
+
+def tile_regions(labels, cand):
+    """확인할 영역을 페이지 위→아래, 왼→오른 순서로. (이웃 칸이 같은 컷이 되게)"""
+    boxes = ndimage.find_objects(labels)
+    def key(r):
+        sl = boxes[r - 1]
+        return ((sl[0].start + sl[0].stop) // 120, (sl[1].start + sl[1].stop) // 2)
+    return sorted((int(r) for r in cand if boxes[r - 1] is not None), key=key)
+
+
+def region_sheets(labels, boundary, regions):
+    """영역마다 둘레를 넉넉히 잘라 그 영역만 빨갛게 칠한 칸을 만들고 판으로 모은다. → [판 이미지]"""
+    h, w = labels.shape
+    boxes = ndimage.find_objects(labels)
+    from PIL import ImageDraw
+    font = match._font(22)
+    tiles = []
+    for n, r in enumerate(regions, 1):
+        sl = boxes[r - 1]
+        cy, cx = (sl[0].start + sl[0].stop) // 2, (sl[1].start + sl[1].stop) // 2
+        # 영역보다 넉넉히 잘라 얼굴·몸이 보이게 한다 (작은 영역도 최소 280px 둘레)
+        half = max(int(max(sl[0].stop - sl[0].start, sl[1].stop - sl[1].start) * 0.8), 140)
+        y0, y1, x0, x1 = max(0, cy - half), min(h, cy + half), max(0, cx - half), min(w, cx + half)
+        rgb = np.full((y1 - y0, x1 - x0, 3), 255, np.uint8)
+        rgb[labels[y0:y1, x0:x1] == r] = (255, 120, 120)
+        rgb[boundary[y0:y1, x0:x1]] = 0
+        im = Image.fromarray(rgb)
+        im.thumbnail((TILE, TILE), Image.LANCZOS)
+        cell = Image.new("RGB", (TILE, TILE + 30), "white")
+        cell.paste(im, ((TILE - im.width) // 2, 30 + (TILE - im.height) // 2))
+        d = ImageDraw.Draw(cell)
+        d.text((8, 4), str(n), fill=(0, 0, 0), font=font)
+        d.rectangle((0, 0, TILE - 1, TILE + 29), outline=(170, 170, 170))
+        tiles.append(cell)
+    per = TILE_COLS * TILE_ROWS
+    sheets = []
+    for i in range(0, len(tiles), per):
+        group = tiles[i:i + per]
+        rows = (len(group) + TILE_COLS - 1) // TILE_COLS
+        sheet = Image.new("RGB", (TILE_COLS * TILE, rows * (TILE + 30)), "white")
+        for j, cell in enumerate(group):
+            sheet.paste(cell, ((j % TILE_COLS) * TILE, (j // TILE_COLS) * (TILE + 30)))
+        sheets.append(sheet)
+    return sheets
+
+
+def profile_images(chars):
+    """대표 그림이 있는 캐릭터 → [(이름, 그림)]"""
+    out = []
+    for c in chars:
+        if c.get("image") and Path(c["image"]).exists():
+            im = Image.open(c["image"]).convert("RGB")
+            im.thumbnail((700, 900), Image.LANCZOS)
+            out.append((c["name"], im))
+    return out
+
+
+def tiles_job(sheets, chars, count):
+    profiles = profile_images(chars)
+    names = [c["name"] for c in chars]
+    looks = "\n".join(f"- {c['name']}: {c['look'] or '(설명 없음)'}" for c in chars)
+    item = match._obj({"tile": {"type": "integer"}, "part": {"type": "string", "enum": TILE_PARTS},
+                       "character": {"type": "string", "enum": names + ["모름", "없음"]}})
+    schema = match._obj({"items": {"type": "array", "items": item}})
+    prompt = TILE_PROMPT.format(names=", ".join(n for n, _ in profiles) or "(대표 그림 없음)",
+                                parts=", ".join(TILE_PARTS), looks=looks, count=count)
+    return match.Job(np.array([0]), [], [im for _, im in profiles], sheets, prompt, schema, map_label="[영역 확인]"), profiles
+
+
+def save_tiles(job, profiles, regions, folder):
+    """요청 폴더·MCP용: 대표 그림·칸 판·지시문을 남긴다."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    names = []
+    for i, (name, im) in enumerate(profiles, 1):
+        names.append(f"profile_{i}.png")
+        im.save(folder / names[-1])
+    for i, im in enumerate(job.map_images, 1):
+        names.append(f"tiles_{i}.png")
+        im.save(folder / names[-1])
+    (folder / "tiles.json").write_text(json.dumps({"regions": regions, "profiles": [n for n, _ in profiles],
+                                                   "sheets": len(job.map_images)}, ensure_ascii=False))
+    (folder / "schema.json").write_text(json.dumps(job.schema, ensure_ascii=False, indent=2))
+    (folder / "README.md").write_text(
+        "# psd-paint 영역 확인 요청\n\n"
+        f"이미지: {', '.join(names)} (profile_* = 등장인물 대표 그림, tiles_* = 영역 확인 칸)\n\n"
+        f"{job.prompt}\n\n"
+        "답은 schema.json 형식의 JSON으로 이 폴더의 answer.json에 저장한다.\n"
+        "저장한 뒤 psd-paint에서 같은 파일을 다시 실행하면 답을 적용한다.\n")
+
+
+def from_tiles(answer, regions, n):
+    """칸 답 → part_of, person_of, who, background"""
+    said = {int(it["tile"]): it for it in answer.get("items", [])}
+    part_of, person_of, who = {}, {}, {}
+    background = np.zeros(n + 1, bool)
+    for t, r in enumerate(regions, 1):
+        it = said.get(t)
+        if not it:
+            continue
+        part = it.get("part")
+        if part == "배경":
+            background[r] = True
+        elif part == "사물":
+            part_of[r] = "사물"
+        elif part in BODY:
+            part_of[r] = part
+            name = it.get("character") or "모름"
+            person_of[r] = name
+            who[name] = name
+    return part_of, person_of, who, background

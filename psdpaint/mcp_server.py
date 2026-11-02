@@ -25,8 +25,9 @@ server = MCPServer(
         "레퍼런스에서 같은 인물의 부위별 팔레트를 골라 apply_match(people=…)를 호출한다. "
         "판단이 서지 않는 영역과 배경은 none으로 둔다. 엑스트라도 피부는 피부 팔레트를 고른다. "
         "apply_match가 돌려준 칠한 결과 지도를 보고 틀린 곳이 있으면 한 번 고쳐 다시 호출한다. "
-        "paint_psd(characters=true)는 캐릭터 프리셋 방식이다. 이미지 모델이 부위·인물을 나눈 뒤 인물마다 잘라 낸 선화를 돌려주면, "
-        "등장인물 목록에서 누구인지 골라 apply_characters를 호출한다."
+        "paint_psd(characters=true)는 캐릭터 프리셋 방식이다. 등장인물 대표 그림과 영역 확인 칸(영역마다 빨갛게 강조)을 돌려주면, "
+        "칸마다 부위와 누구인지 적어 apply_characters(job, items=[...])를 호출한다. "
+        "(앱 설정에서 Gemini 이미지 지도를 고른 경우에는 인물 그림을 돌려주니 apply_characters(job, people=[...])로 답한다.)"
     ),
 )
 
@@ -64,6 +65,18 @@ def _run(psd_path, out_path, opts):
         (folder / "job.json").write_text(json.dumps(
             {"psd_path": str(psd_path), "out_path": str(out_path), "options": options}, ensure_ascii=False))
         readme = (folder / "README.md").read_text()
+        if (folder / "tiles.json").exists():
+            info = json.loads((folder / "tiles.json").read_text())
+            prompt = readme.split("\n\n", 2)[2].split("답은 schema.json")[0].strip()
+            out = [f"영역 확인이 필요합니다. 작업: {folder}\n"
+                   "등장인물 대표 그림과 영역 확인 칸을 보고, 칸마다 부위·누구인지 적어 "
+                   "apply_characters(job=위 경로, items=[{\"tile\", \"part\", \"character\"}, …]) 를 호출하세요.\n"]
+            for i, name in enumerate(info["profiles"], 1):
+                out += [f"[등장인물 {name}]", Image(path=folder / f"profile_{i}.png")]
+            for i in range(1, info["sheets"] + 1):
+                out += [f"[영역 확인 {i}]", Image(path=folder / f"tiles_{i}.png")]
+            out.append(prompt)
+            return out
         if (folder / "characters.json").exists():
             prompt = readme.split("\n\n", 2)[2].split("답은 schema.json")[0].strip()
             out = [f"인물이 누구인지 알아봐야 합니다. 작업: {folder}\n"
@@ -116,7 +129,8 @@ def inspect_psd(psd_path: str) -> str:
 @server.tool()
 def paint_psd(psd_path: str, reference: str = "", output_dir: str = "", line_group: str = "선화",
               hint_group: str = "참고", max_layers: int = 10, offset_px: int = 2, auto_fill: bool = True,
-              boundary_layers: str = "컷*, *테두리*", overwrite: bool = False, characters: bool = False):
+              boundary_layers: str = "컷*, *테두리*", overwrite: bool = False, characters: bool = False,
+              parts: str = ""):
     """선화 PSD에 밑색 레이어를 깔아 새 PSD(원본이름_밑색.psd)로 저장한다. overwrite가 아니면 원본은 바꾸지 않는다.
 
     - reference를 비우면 PSD 안의 '참고' 폴더(점·낙서 힌트)를 쓰고, 힌트가 없는 영역은 회색으로 자동 칠한다.
@@ -124,8 +138,9 @@ def paint_psd(psd_path: str, reference: str = "", output_dir: str = "", line_gro
       레퍼런스·원고 번호 지도 이미지를 돌려주니, 보고 나서 apply_match를 호출한다.
     - boundary_layers: 선화 외에 경계로 쓸 레이어 이름 패턴(쉼표 구분, * 사용).
     - overwrite: 새 파일 대신 원본 PSD에 저장한다. 처음 한 번 원본을 '이름_백업.psd'로 남긴다.
-    - characters: 캐릭터 프리셋 방식. psd-paint 앱에 저장한 색상 프리셋('캐릭터/부위')과 생김새를 쓴다.
-      Gemini 이미지 모델이 부위·인물을 나누고(앱에 Gemini 키 필요), 인물 그림을 돌려주면 apply_characters로 누구인지 알려 준다.
+    - characters: 캐릭터 프리셋 방식. psd-paint 앱에 저장한 색상 프리셋('캐릭터/부위')과 캐릭터 프로필(대표 그림·생김새)을 쓴다.
+      등장인물 그림과 영역 확인 칸을 돌려주면 칸마다 부위·누구인지 apply_characters(items=…)로 알려 준다.
+    - parts: 부위 나누기. tiles(영역 확인 칸, 기본 — Claude만으로 된다) · image(Gemini 이미지 지도, 앱에 Gemini 키 필요)
     """
     opts = Options(line_group=line_group, hint_group=hint_group, max_layers=max_layers, offset_px=offset_px,
                    auto_fill=auto_fill, ai_mode="files",
@@ -135,9 +150,11 @@ def paint_psd(psd_path: str, reference: str = "", output_dir: str = "", line_gro
 
         from . import ai
         from . import characters as chars
+        settings = QSettings("psd-paint", "psd-paint")
         opts.hint_source, opts.characters = "characters", chars.from_app_settings()
-        opts.ai_image_model = QSettings("psd-paint", "psd-paint").value("image_model", chars.IMAGE_MODEL)
-        opts.ai_image_key = ai.get_key("gemini")
+        opts.ai_parts = parts or settings.value("parts_method", "tiles")
+        opts.ai_image_model = settings.value("image_model", chars.IMAGE_MODEL)
+        opts.ai_image_key = ai.get_key("gemini") if opts.ai_parts == "image" else ""
     elif reference:
         opts.hint_source = "psd" if reference.lower().endswith(".psd") else "image"
         opts.hint_path = reference
@@ -176,15 +193,25 @@ def apply_match(job: str, people: list[dict] | None = None, objects: list[dict] 
 
 
 @server.tool()
-def apply_characters(job: str, people: list[dict]):
-    """paint_psd(characters=true)가 돌려준 인물마다 누구인지 알려 주고 칠한다.
+def apply_characters(job: str, items: list[dict] | None = None, people: list[dict] | None = None):
+    """paint_psd(characters=true)의 요청에 답하고 칠한다.
 
     - job: paint_psd가 알려 준 작업 폴더 경로
-    - people: [{"person": "1A", "character": 등장인물 이름 또는 "모름", "reason": 짧은 근거}]
+    - items: 영역 확인 칸의 답. [{"tile": 칸 번호, "part": 부위·사물·배경, "character": 등장인물 이름·모름·없음}]
+      모든 칸을 적는다. 고칠 때는 바꿀 칸만 다시 보내도 된다 (전 답에 덮어쓴다).
+    - people: 이미지 지도 방식의 인물 답. [{"person": "1A", "character": 등장인물 이름 또는 "모름", "reason": 짧은 근거}]
     """
     folder = Path(job)
     info = json.loads((folder / "job.json").read_text())
-    (folder / "answer.json").write_text(json.dumps({"people": people}, ensure_ascii=False, indent=1))
+    answer_file = folder / "answer.json"
+    if items is not None:
+        old = json.loads(answer_file.read_text()).get("items", []) if answer_file.exists() else []
+        merged = {int(it["tile"]): it for it in old}
+        merged.update({int(it["tile"]): it for it in items})
+        answer = {"items": [merged[k] for k in sorted(merged)]}
+    else:
+        answer = {"people": people or []}
+    answer_file.write_text(json.dumps(answer, ensure_ascii=False, indent=1))
     from . import ai
     opts = Options(**info["options"])
     opts.ai_image_key = ai.get_key("gemini")

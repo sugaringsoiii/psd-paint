@@ -32,6 +32,7 @@ class Options:
     characters: list = field(default_factory=list)  # 캐릭터 프리셋 [{"name", "look", "colors": {부위: rgb}}]
     ai_image_model: str = "gemini-3.1-flash-lite-image"  # 캐릭터 방식에서 부위·사람을 칠해 나누는 이미지 모델 (Gemini)
     ai_image_key: str = ""              # 그 이미지 모델용 Gemini API 키 (실행할 때만 넘긴다)
+    ai_parts: str = "image"             # 캐릭터 방식의 부위 나누기: image(Gemini 이미지 지도) · tiles(글 AI가 영역 확인 칸에 답)
     extra_boundary: list = field(default_factory=lambda: ["컷*", "*테두리*"])  # 경계로 쓸 픽셀 레이어 이름 패턴
     output_group: str = "밑색"
     gap_close_px: int = 2       # 선을 이만큼 두껍게 해서 작은 틈을 막는다
@@ -629,13 +630,71 @@ def ai_match(mismatch, labels, n, boundary, frame, opts, out_path, say):
     return region_key, keys, names, job.usage
 
 
-def character_match(labels, n, boundary, frame, opts, out_path, say):
-    """캐릭터 프리셋으로 칠한다: 이미지 모델이 부위·사람을 나누고, AI가 누구인지 고르고, 색은 프리셋에서.
+def _ask_or_wait(job, save, opts, folder, say, msg):
+    """요청 폴더 방식이면 답을 기다리고(없으면 요청을 남기고 멈춘다), API 방식이면 바로 묻는다. → 답, 사용량"""
+    from . import match
 
-    labels를 고칠 수 있다 (한 영역에 부위가 섞이면 나눈다).
+    answer_file = Path(folder) / "answer.json"
+    if opts.ai_mode == "files":
+        if not answer_file.exists():
+            save()
+            raise AwaitingAnswer(f"{msg} 요청을 만들었습니다: {folder}. "
+                                 "Claude Code·Codex에서 이 폴더의 README.md대로 answer.json을 만든 뒤 다시 실행하세요.")
+        return json.loads(answer_file.read_text()), {}
+    if not opts.ai_key:
+        raise PaintError("AI의 API 키가 없습니다. 설정의 AI 연결에 키를 넣으세요.")
+    say(f"AI가 {msg} 중", 0.45)
+    answer = match.ask(job, opts.ai_provider, opts.ai_key, opts.ai_model)
+    save()
+    answer_file.write_text(json.dumps(answer, ensure_ascii=False, indent=1))
+    return answer, dict(job.usage)
+
+
+def _tiles_match(labels, n, boundary, cand, chars, opts, folder, say):
+    """영역 확인 칸: 글 AI가 영역마다 부위·누구인지 답한다 (그림 모델 없이)."""
+    from . import characters
+
+    regions = characters.tile_regions(labels, cand)
+    say(f"영역 확인 칸 만드는 중 ({len(regions)}곳)", 0.4)
+    sheets = characters.region_sheets(labels, boundary, regions)
+    job, profiles = characters.tiles_job(sheets, chars, len(regions))
+    answer, usage = _ask_or_wait(job, lambda: characters.save_tiles(job, profiles, regions, folder), opts, folder,
+                                 say, "영역 확인")
+    part_of, person_of, who, background = characters.from_tiles(answer, regions, n)
+    return part_of, person_of, who, background, usage
+
+
+def _image_match(labels, boundary, frame, cand, bg, chars, opts, folder, say):
+    """이미지 지도: 이미지 모델이 부위·사람을 칠하고, 글 AI가 누구인지 고른다."""
+    from . import characters
+
+    part_px, person_px, person_ids, chunks, usage = characters.image_maps(
+        labels, boundary, np.isin(labels, cand[~bg[cand]]) | frame, opts.ai_image_key, opts.ai_image_model, folder,
+        lambda msg: say(msg, 0.4))
+    n = characters.split_mixed(labels, part_px, cand)
+    bg_hint = np.r_[bg, np.zeros(n + 1 - len(bg), bool)]
+    part_of, person_of, background = characters.decide(labels, n, part_px, person_px, person_ids, bg_hint)
+    crops = characters.person_crops(labels, boundary, person_px, person_ids, chunks)
+    who = {}
+    if crops and opts.ai_mode != "off":
+        job = characters.identify_job(crops, chars)
+        answer, used = _ask_or_wait(job, lambda: characters.save_identify(job, crops, folder), opts, folder, say,
+                                    "인물 알아보기")
+        if used:
+            usage = {"model": f"{usage['model']} + {used.get('model', opts.ai_model)}",
+                     "input": usage["input"] + used.get("input", 0), "output": usage["output"] + used.get("output", 0),
+                     "calls": usage["calls"] + 1}
+        who = {p["person"]: p["character"] for p in answer.get("people", [])}
+    return part_of, person_of, who, background, usage, n
+
+
+def character_match(labels, n, boundary, frame, opts, out_path, say):
+    """캐릭터 프리셋으로 칠한다: 부위·누구인지는 AI가 정하고(opts.ai_parts), 색은 프리셋에서 가져온다.
+
+    labels를 고칠 수 있다 (이미지 지도 방식에서 한 영역에 부위가 섞이면 나눈다).
     → (영역별 키, 키 목록, 레이어 이름 순서, 사용량, 비워 둘 배경 영역)
     """
-    from . import characters, match
+    from . import characters
 
     chars = [c for c in opts.characters if c.get("colors")]
     if not chars:
@@ -649,36 +708,18 @@ def character_match(labels, n, boundary, frame, opts, out_path, say):
     if folder.exists() and not (opts.ai_mode == "files" and answer_file.exists()):
         # 새로 묻는다: 전에 만든 지도·답은 지운다 (요청 폴더 방식에서 답을 받은 뒤 다시 실행할 때만 그대로 쓴다)
         for old in [*folder.glob("parts_*.png"), *folder.glob("persons_*.png"), *folder.glob("person_*.png"),
-                    answer_file]:
+                    *folder.glob("tiles_*.png"), *folder.glob("profile_*.png"), folder / "tiles.json",
+                    folder / "characters.json", answer_file]:
             old.unlink(missing_ok=True)
+    if opts.ai_parts == "tiles" and opts.ai_mode == "off":
+        raise PaintError("영역 확인 칸 방식은 AI가 답해야 합니다. 설정의 AI 매칭을 켜세요 (MCP는 자동).")
     try:
-        part_px, person_px, person_ids, chunks, usage = characters.image_maps(
-            labels, boundary, np.isin(labels, cand[~bg[cand]]) | frame, opts.ai_image_key, opts.ai_image_model, folder,
-            lambda msg: say(msg, 0.4))
-        n = characters.split_mixed(labels, part_px, cand)
-        bg_hint = np.r_[bg, np.zeros(n + 1 - len(bg), bool)]
-        part_of, person_of, background = characters.decide(labels, n, part_px, person_px, person_ids, bg_hint)
-        crops = characters.person_crops(labels, boundary, person_px, person_ids, chunks)
-        who = {}
-        if crops and opts.ai_mode != "off":
-            job = characters.identify_job(crops, chars)
-            if opts.ai_mode == "files":
-                if not answer_file.exists():
-                    characters.save_identify(job, crops, folder)
-                    raise AwaitingAnswer(f"인물 알아보기 요청을 만들었습니다: {folder}. "
-                                         "Claude Code·Codex에서 이 폴더의 README.md대로 answer.json을 만든 뒤 다시 실행하세요.")
-                answer = json.loads(answer_file.read_text())
-            else:
-                if not opts.ai_key:
-                    raise PaintError("인물을 알아볼 AI의 API 키가 없습니다. 설정의 AI 연결에 키를 넣으세요.")
-                say("AI가 인물 알아보는 중", 0.45)
-                answer = match.ask(job, opts.ai_provider, opts.ai_key, opts.ai_model)
-                usage = {"model": f"{usage['model']} + {job.usage.get('model', opts.ai_model)}",
-                         "input": usage["input"] + job.usage.get("input", 0),
-                         "output": usage["output"] + job.usage.get("output", 0), "calls": usage["calls"] + 1}
-                characters.save_identify(job, crops, folder)
-                answer_file.write_text(json.dumps(answer, ensure_ascii=False, indent=1))
-            who = {p["person"]: p["character"] for p in answer.get("people", [])}
+        if opts.ai_parts == "tiles":
+            part_of, person_of, who, background, usage = _tiles_match(labels, n, boundary, cand, chars, opts,
+                                                                       folder, say)
+        else:
+            part_of, person_of, who, background, usage, n = _image_match(labels, boundary, frame, cand, bg, chars,
+                                                                           opts, folder, say)
     except RuntimeError as e:
         raise PaintError(f"캐릭터 매칭 실패: {e}") from None
     region_key, keys, names = characters.assign(part_of, person_of, who, chars, n, labels, background)

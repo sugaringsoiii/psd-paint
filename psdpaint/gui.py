@@ -494,6 +494,125 @@ class PresetsTab(QWidget):
         self.render()
 
 
+class CharactersTab(QWidget):
+    """캐릭터 프로필 탭: 이름·대표 그림·생김새. AI가 누구인지 알아볼 때 함께 본다.
+
+    색은 색상 프리셋의 '이름/부위'(예: 하늘/머리)에서 가져온다. 프로필은 앱 데이터 폴더에 저장한다 (MCP도 읽는다).
+    """
+
+    THUMB = 72
+
+    def __init__(self, settings):
+        super().__init__()
+        self.profiles = characters.load_profiles()
+        if not self.profiles:  # 예전 설정의 '캐릭터 생김새' 글을 프로필로 옮긴다
+            looks = characters.parse_looks(settings.value("character_looks", ""))
+            self.profiles = [{"name": n, "look": t, "image": ""} for n, t in looks.items()]
+            if self.profiles:
+                characters.save_profiles(self.profiles)
+        add_btn = button("추가", "ghost", "plus")
+        add_btn.clicked.connect(lambda: self.add())
+        top = QHBoxLayout()
+        top.addWidget(label("캐릭터", "section"))
+        top.addStretch()
+        top.addWidget(add_btn)
+        note = label("참고 방식을 '캐릭터 프리셋 · AI'로 고르면, AI가 대표 그림과 생김새를 보고 누구인지 알아본 뒤 "
+                     "색상 프리셋의 '이름/부위' 색(예: 하늘/머리, 하늘/재킷)으로 칠합니다. "
+                     "생김새에는 다른 캐릭터와 구분되는 점(머리 모양·머리띠·귀걸이·안경)을 적으세요.", "summary")
+        note.setWordWrap(True)
+        self.box = QVBoxLayout()
+        self.box.setSpacing(8)
+        self.empty = label("등록한 캐릭터가 없어요. [추가]를 눌러 이름·대표 그림·생김새를 넣으세요.", "muted")
+        inner = QWidget()
+        iv = QVBoxLayout(inner)
+        iv.setContentsMargins(0, 0, 0, 8)
+        iv.addLayout(self.box)
+        iv.addStretch()
+        iv.addWidget(self.empty, 0, Qt.AlignCenter)
+        iv.addStretch()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(inner)
+        pv = QVBoxLayout(self)
+        pv.setContentsMargins(0, 8, 0, 0)
+        pv.setSpacing(12)
+        pv.addLayout(top)
+        pv.addWidget(note)
+        pv.addWidget(scroll, 1)
+        self.render()
+
+    def render(self):
+        clear_layout(self.box)
+        for p in self.profiles:
+            self.box.addWidget(self.row(p))
+        self.empty.setVisible(not self.profiles)
+
+    def row(self, p):
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        thumb = QPushButton()
+        thumb.setFixedSize(self.THUMB, self.THUMB)
+        thumb.setToolTip("대표 그림 고르기 (캐릭터 시트·얼굴이 잘 보이는 그림)")
+        if p.get("image"):
+            pm = QPixmap(p["image"]).scaled(self.THUMB - 6, self.THUMB - 6, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            thumb.setIcon(QIcon(pm))
+            thumb.setIconSize(pm.size())
+        else:
+            thumb.setText("그림")
+        thumb.clicked.connect(lambda _=False, p=p: self.pick_image(p))
+        name = QLineEdit(p["name"])
+        name.setPlaceholderText("이름")
+        name.setFixedWidth(120)
+        name.editingFinished.connect(lambda p=p, e=name: self.set_field(p, "name", e.text().strip()))
+        look = QLineEdit(p.get("look", ""))
+        look.setPlaceholderText("생김새: 밝은 갈색 곱슬머리, 고양이 귀 머리띠, 귀 피어싱")
+        look.editingFinished.connect(lambda p=p, e=look: self.set_field(p, "look", e.text().strip()))
+        delete = button("", "ghost", "delete")
+        delete.setToolTip("이 캐릭터 지우기")
+        delete.clicked.connect(lambda _=False, p=p: self.remove(p))
+        h.addWidget(thumb)
+        h.addWidget(name, 0, Qt.AlignVCenter)
+        h.addWidget(look, 1, Qt.AlignVCenter)
+        h.addWidget(delete, 0, Qt.AlignVCenter)
+        return w
+
+    def save(self):
+        self.profiles = [p for p in self.profiles if p["name"]]
+        characters.save_profiles(self.profiles)
+        self.profiles = characters.load_profiles()  # 그림 경로가 앱 데이터 폴더로 바뀐다
+
+    def add(self):
+        n = len(self.profiles) + 1
+        while any(p["name"] == f"캐릭터{n}" for p in self.profiles):
+            n += 1
+        self.profiles.append({"name": f"캐릭터{n}", "look": "", "image": ""})
+        self.save()
+        self.render()
+
+    def set_field(self, p, key, value):
+        if key == "name" and (not value or any(q is not p and q["name"] == value for q in self.profiles)):
+            self.render()  # 빈 이름·같은 이름은 되돌린다
+            return
+        if p.get(key) != value:
+            p[key] = value
+            self.save()
+
+    def pick_image(self, p):
+        path, _ = QFileDialog.getOpenFileName(self, f"{p['name']} 대표 그림", "", "그림 (*.png *.jpg *.jpeg *.webp)")
+        if path:
+            p["image"] = path
+            self.save()
+            self.render()
+
+    def remove(self, p):
+        self.profiles.remove(p)
+        self.save()
+        self.render()
+
+
 class MainWindow(QMainWindow):
     ai_test_done = Signal(bool, str)
     repaint_done = Signal(int, object, str)
@@ -706,9 +825,12 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.build_settings(), "")
         self.presets = PresetsTab(self.settings)
         tabs.addTab(self.presets, "")
+        self.characters_tab = CharactersTab(self.settings)
+        tabs.addTab(self.characters_tab, "")
         # 탭 이름은 직접 그린다. Qt 탭은 아이콘과 글자 사이가 11px 가까이 벌어져 Figma(4px)와 다르다
         tab_parts = []
-        for i, (name, text) in enumerate((("preview", "미리보기"), ("settings", "설정"), ("palette", "색상 프리셋"))):
+        for i, (name, text) in enumerate((("preview", "미리보기"), ("settings", "설정"), ("palette", "색상 프리셋"),
+                                               ("user", "캐릭터"))):
             w = QWidget()
             w.setAttribute(Qt.WA_TransparentForMouseEvents)  # 누르면 탭이 받는다
             h = QHBoxLayout(w)
@@ -831,19 +953,24 @@ class MainWindow(QMainWindow):
         ref_note = label("다른 페이지·캐릭터 시트는 AI가 인물과 부위를 맞춰 칠합니다 (아래 AI 연결). "
                          "같은 페이지를 칠한 레퍼런스면 AI 없이 바로 칠합니다.", "summary")
         ref_note.setWordWrap(True)
-        self.looks = QPlainTextEdit(s.value("character_looks", ""))
-        self.looks.setPlaceholderText("하늘: 밝은 갈색 곱슬머리, 고양이 귀 머리띠, 귀 피어싱\n윤재: 짧은 흑발 생머리, 날카로운 눈매")
-        self.looks.setFixedHeight(84)
-        self.looks_note = label("한 줄에 한 명씩 '이름: 생김새'로 적습니다. 색은 색상 프리셋 탭에 "
-                                "'이름/부위'(머리·피부·재킷·조끼·셔츠·넥타이·바지 …)로 넣습니다.", "summary")
+        self.parts_method = Combo()
+        for text, key in (("영역 확인 칸 — Claude 등 글 AI만으로", "tiles"),
+                          ("Gemini 이미지 지도 — 더 정확, Gemini 키 필요", "image")):
+            self.parts_method.addItem(text, key)
+        self.parts_method.setCurrentIndex(max(0, self.parts_method.findData(s.value("parts_method", "tiles"))))
+        self.parts_method.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.parts_method.setMinimumContentsLength(8)
+        self.looks_note = label("캐릭터는 캐릭터 탭에, 색은 색상 프리셋 탭에 '이름/부위'"
+                                "(머리·피부·재킷·조끼·셔츠·넥타이·바지 …)로 넣습니다.", "summary")
         self.looks_note.setWordWrap(True)
         section("참고 방식")
         add("방식", vbox(self.src_layer, self.src_image, self.src_psd, self.src_chars), top=True)
         add("레퍼런스", hbox(self.hint_path, self.hint_browse))
         add("", ref_note)
-        add("캐릭터", self.looks, top=True)
+        add("부위 나누기", self.parts_method)
         add("", self.looks_note)
-        self.looks_row = (self.looks, self.looks_note, grid.itemAtPosition(row - 2, 0).widget())
+        self.looks_row = (self.parts_method, self.looks_note, grid.itemAtPosition(row - 2, 0).widget())
+        self.parts_method.currentIndexChanged.connect(self.update_image_model)
         for b in (self.src_layer, self.src_image, self.src_psd, self.src_chars):
             b.toggled.connect(self.update_ref_enabled)
         self.update_ref_enabled()
@@ -974,6 +1101,7 @@ class MainWindow(QMainWindow):
         self.image_model.setToolTip("캐릭터 프리셋 방식에서 부위·인물을 칠해 나누는 Gemini 이미지 모델입니다.\n"
                                     "Lite가 가장 싸고 빠릅니다. 제공자와 상관없이 Gemini 키를 씁니다.")
         add("이미지 모델", self.image_model)
+        self.update_image_model()
         add("제공자", self.provider)
         add("모델", hbox(self.model, self.list_btn))
         add("API 키", hbox(self.api_key, self.test_btn))
@@ -1014,7 +1142,7 @@ class MainWindow(QMainWindow):
         s.setValue("gap", self.gap.value())
         s.setValue("hint_source", self.hint_source())
         s.setValue("hint_path", self.hint_path.text())
-        s.setValue("character_looks", self.looks.toPlainText())
+        s.setValue("parts_method", self.parts_method.currentData())
         s.setValue("image_model", self.image_model.currentData())
         pid = self.provider.currentData()
         s.setValue("provider", pid)
@@ -1040,11 +1168,12 @@ class MainWindow(QMainWindow):
             ai_review=self.ai_review.isChecked(),
             ai_zoom=self.ai_zoom.isChecked(),
             ai_check=self.ai_check.isChecked(),
-            characters=characters.from_presets(self.presets.presets, characters.parse_looks(self.looks.toPlainText())),
+            characters=characters.from_presets(self.presets.presets, profiles=self.characters_tab.profiles),
+            ai_parts=self.parts_method.currentData(),
             ai_image_model=self.image_model.currentData(),
-            # 부위 나누기는 Gemini 이미지 모델이라 제공자와 상관없이 Gemini 키를 쓴다
-            ai_image_key=(self.api_key.text().strip() if self.provider.currentData() == "gemini" else "")
-            or ai.get_key("gemini"),
+            # 이미지 지도는 Gemini 이미지 모델이라 제공자와 상관없이 Gemini 키를 쓴다
+            ai_image_key=((self.api_key.text().strip() if self.provider.currentData() == "gemini" else "")
+                          or ai.get_key("gemini")) if self.parts_method.currentData() == "image" else "",
             extra_boundary=patterns(self.boundary),
             background=patterns(self.background),
             hide_background=self.hide_bg.isChecked(),
@@ -1064,6 +1193,9 @@ class MainWindow(QMainWindow):
         self.hint_browse.setEnabled(on)
         for widget in self.looks_row:
             widget.setVisible(self.src_chars.isChecked())
+
+    def update_image_model(self):
+        self.image_model.setEnabled(self.parts_method.currentData() == "image")
 
     def update_out_enabled(self):
         over = self.overwrite.isChecked()
