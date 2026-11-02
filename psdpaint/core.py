@@ -766,6 +766,17 @@ def _image_match(labels, boundary, frame, cand, bg, chars, opts, folder, say):
     return part_of, person_of, who, background, usage, n
 
 
+def _answer_fits(folder, parts):
+    """요청 폴더의 answer.json이 이 캐릭터 방식(칸·이미지 지도)의 요청에 대한 답인가."""
+    try:
+        answer = json.loads((folder / "answer.json").read_text())
+    except (OSError, ValueError):
+        return False
+    if parts == "tiles":
+        return (folder / "tiles.json").exists() and isinstance(answer.get("items"), list)
+    return (folder / "characters.json").exists() and isinstance(answer.get("people"), list)
+
+
 def character_match(labels, n, boundary, frame, opts, out_path, say):
     """캐릭터 프리셋으로 칠한다: 부위·누구인지는 AI가 정하고(opts.ai_parts), 색은 프리셋에서 가져온다.
 
@@ -783,6 +794,9 @@ def character_match(labels, n, boundary, frame, opts, out_path, say):
     cand = cand[cand > 0]
     folder = Path(out_path).with_name(Path(out_path).stem + "_AI매칭")
     answer_file = folder / "answer.json"
+    if answer_file.exists() and not _answer_fits(folder, opts.ai_parts):
+        # 다른 방식(예전 레퍼런스 매칭 등)이 남긴 답이면 이번 요청의 답이 아니다. 지우고 새로 묻는다
+        answer_file.unlink()
     if folder.exists() and not (opts.ai_mode == "files" and answer_file.exists()):
         # 새로 묻는다: 전에 만든 지도·답은 지운다 (요청 폴더 방식에서 답을 받은 뒤 다시 실행할 때만 그대로 쓴다)
         for old in [*folder.glob("parts_*.png"), *folder.glob("persons_*.png"), *folder.glob("person_*.png"),
