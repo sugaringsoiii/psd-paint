@@ -50,7 +50,6 @@ QLabel#summary {{ color: {MUTED}; font-size: 12px; letter-spacing: 0px; }}
 QLabel#field {{ color: {TEXT}; font-weight: 500; }}
 QLabel#zoom {{ color: {MUTED}; font-weight: 500; }}
 QFrame#sep {{ background: {SEPARATOR}; border: none; }}
-QLabel#empty {{ color: {MUTED}; }}
 QLabel#ok {{ color: {OK}; font-size: 12px; }}
 QLabel#fail {{ color: {FAIL}; font-size: 12px; }}
 
@@ -186,6 +185,13 @@ QScrollBar:horizontal {{ background: transparent; height: 8px; margin: 2px; }}
 QScrollBar::handle:horizontal {{ background: {SCROLL}; border-radius: 3px; min-width: 30px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+QPushButton#swatch {{ padding: 0; min-height: 0; }}  /* 색 칸 (gui.ColorButton) */
+QWidget#tableHead {{ border-top: 1px solid {BORDER}; border-bottom: 1px solid {BORDER}; }}  /* 파일 목록 표 머리와 같게 */
+QWidget#tableRow {{ border-bottom: 1px solid {BORDER}; }}
+QWidget#tableRow:hover {{ background: {RAISED}; }}
+QLineEdit#cell {{ background: transparent; border-color: transparent; padding: 3px 6px; }}
+QLineEdit#cell:hover {{ border-color: {BORDER_HI}; }}
+QLineEdit#cell:focus {{ border-color: {ACCENT}; background: {PANEL}; }}
 QFrame#dialog {{
     background: {PANEL};
     border: 1px solid {BORDER_HI};
@@ -215,5 +221,15 @@ QListWidget#pickerList::item {{ height: 30px; padding-left: 4px; border-radius: 
 QListWidget#pickerList::item:hover {{ background: {SELECT}; }}
 QListWidget#pickerList::item:selected {{ background: {SELECT}; color: {TEXT}; }}
 QListWidget#pickerList::item:disabled {{ color: {FAINT}; }}
-QToolTip {{ background: {TEXT}; color: white; border: none; padding: 6px; border-radius: 6px; }}
+QToolTip {{ background: {PANEL}; color: {TEXT}; border: 1px solid {BORDER_HI}; padding: 4px 8px; }}
+QFrame#tip {{ background: {PANEL}; border: 1px solid {BORDER_HI}; border-radius: 8px; }}  /* gui.Tip */
+QLabel#tipText {{ color: {TEXT}; }}
+QLabel#keycap {{
+    color: {MUTED};
+    font-size: 11px;
+    border: 1px solid {BORDER_HI};
+    border-radius: 4px;
+    min-width: 12px;
+    padding: 1px 4px;
+}}
 """

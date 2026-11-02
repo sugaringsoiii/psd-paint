@@ -72,7 +72,7 @@ def _get(url, headers):
 def test_connection(provider, key, model=""):
     """키가 유효한지 모델 정보 조회로 확인한다 (토큰을 쓰지 않는 요청). → (성공 여부, 메시지)"""
     if not key:
-        return False, "API 키를 입력하세요"
+        return False, "API 키를 입력하세요."
     try:
         if provider == "claude":
             import anthropic
@@ -84,11 +84,11 @@ def test_connection(provider, key, model=""):
                 client.models.list(limit=1)
                 return True, "연결됨"
             except anthropic.AuthenticationError:
-                return False, "API 키가 올바르지 않습니다"
+                return False, "API 키가 올바르지 않습니다."
             except anthropic.NotFoundError:
                 return False, f"모델을 찾을 수 없습니다: {model}"
             except anthropic.APIConnectionError:
-                return False, "네트워크에 연결할 수 없습니다"
+                return False, "네트워크에 연결할 수 없습니다."
             except anthropic.APIStatusError as e:
                 return False, f"오류 {e.status_code}: {e.message}"
         if provider == "openai":
@@ -102,16 +102,16 @@ def test_connection(provider, key, model=""):
         return False, f"알 수 없는 제공자: {provider}"
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
-            return False, "API 키가 올바르지 않습니다"
+            return False, "API 키가 올바르지 않습니다."
         if e.code == 404:
             return False, f"모델을 찾을 수 없습니다: {model}"
         if e.code == 400:
-            return False, "API 키가 올바르지 않거나 요청이 거부되었습니다"
+            return False, "API 키가 올바르지 않거나 요청이 거부되었습니다."
         return False, f"오류 {e.code}"
     except urllib.error.URLError as e:
         if "CERTIFICATE" in str(e.reason):
-            return False, "HTTPS 인증서를 확인하지 못했습니다 (회사 보안 프로그램이나 인증서 설정을 확인하세요)"
-        return False, f"네트워크에 연결할 수 없습니다 ({e.reason})"
+            return False, "HTTPS 인증서를 확인하지 못했습니다 (회사 보안 프로그램이나 인증서 설정을 확인하세요)."
+        return False, f"네트워크에 연결할 수 없습니다 ({e.reason})."
 
 
 def list_models(provider, key):

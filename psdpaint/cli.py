@@ -68,7 +68,7 @@ def main(argv=None):
         print(f"    → {r.out_path} ({time.time() - t:.1f}초)")
         nxt = next_options(opts, r)  # 연속 모드: 이 결과를 다음 파일의 레퍼런스로
         if nxt is not opts:
-            print(f"    다음 파일은 이 결과를 레퍼런스로 씁니다")
+            print("    다음 파일은 이 결과를 레퍼런스로 씁니다")
         opts = nxt
         if r.ai_usage:
             from . import ai

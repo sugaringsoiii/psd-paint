@@ -204,7 +204,7 @@ def read_hints(psd, opts, psd_path=None, boundary=None):
 
     if opts.hint_source == "image":
         if not opts.hint_path or not Path(opts.hint_path).exists():
-            raise PaintError("레퍼런스 이미지를 지정하세요")
+            raise PaintError("레퍼런스 이미지를 지정하세요.")
         im = Image.open(opts.hint_path).convert("RGBA")
         if im.size != (psd.width, psd.height) and abs(im.width / im.height - psd.width / psd.height) > 0.01:
             raise LineMismatch("레퍼런스 이미지 크기가 원고와 달라 다른 페이지로 보입니다", _flatten(np.asarray(im)))
@@ -215,7 +215,7 @@ def read_hints(psd, opts, psd_path=None, boundary=None):
         image_mode = True
     elif opts.hint_source == "psd":
         if not opts.hint_path or not Path(opts.hint_path).exists():
-            raise PaintError("레퍼런스 PSD를 지정하세요")
+            raise PaintError("레퍼런스 PSD를 지정하세요.")
         ref = PSDImage.open(opts.hint_path)
         group = psdio.find(ref, opts.output_group, True) or psdio.find(ref, opts.hint_group, True)
         line = psdio.find(ref, opts.line_group, True)
@@ -247,7 +247,7 @@ def read_hints(psd, opts, psd_path=None, boundary=None):
         if hint is not None and hint.is_group():
             _folder_hints(hint, psd, key_map, keys, boundary)
             if not keys and not opts.auto_fill:
-                raise PaintError(f"'{opts.hint_group}' 폴더 안에 힌트가 없습니다")
+                raise PaintError(f"'{opts.hint_group}' 폴더 안에 힌트가 없습니다.")
         elif hint is not None:
             rgba = psdio.canvas_rgba(hint, psd)
             if boundary is not None:
@@ -258,7 +258,7 @@ def read_hints(psd, opts, psd_path=None, boundary=None):
             keys = _image_hints(load_sidecar(sidecar, psd), opts, key_map)
             image_mode = True
         elif not opts.auto_fill:
-            raise PaintError(f"'{opts.hint_group}' 힌트 폴더·레이어나 참고 이미지가 없습니다")
+            raise PaintError(f"'{opts.hint_group}' 힌트 폴더·레이어나 참고 이미지가 없습니다.")
 
     if image_mode:
         # 넓게 칠한 색부터 위에 둔다
@@ -273,7 +273,7 @@ def segment(psd, opts):
     """선화와 컷 테두리로 닫힌 영역을 나눈다. → (선화 폴더, 경계, 컷 테두리, 영역 번호 맵, 영역 수)"""
     line_group = psdio.find(psd, opts.line_group, True)
     if line_group is None:
-        raise PaintError(f"'{opts.line_group}' 선화 폴더가 없습니다")
+        raise PaintError(f"'{opts.line_group}' 선화 폴더가 없습니다.")
     # 선화 폴더 안의 배경 선은 경계에서 뺀다 (배경이 잘게 쪼개지지 않게)
     with psdio.hidden(psdio.matching(line_group, opts.background)):
         line = psdio.group_alpha(line_group, psd) > 80
@@ -526,7 +526,7 @@ def ai_match(mismatch, labels, n, boundary, frame, opts, out_path, say):
         rgba = np.dstack([mismatch.ref_rgb, np.full(mismatch.ref_rgb.shape[:2], 255, np.uint8)])
         palette, masks = match.palette_from_image(rgba, quantize, opts.color_tol, opts.color_min_share)
     if not palette:
-        raise PaintError("레퍼런스에서 밑색을 찾지 못했습니다")
+        raise PaintError("레퍼런스에서 밑색을 찾지 못했습니다.")
     job = match.make_job(labels, boundary, cand, mismatch.ref_rgb, palette, masks, bg_mask=bg[labels])
 
     if opts.ai_mode == "files":
@@ -535,11 +535,11 @@ def ai_match(mismatch, labels, n, boundary, frame, opts, out_path, say):
         if not answer_file.exists():
             match.save_job(job, folder)
             raise AwaitingAnswer(f"AI 매칭 요청을 만들었습니다: {folder}. "
-                             "Claude Code·Codex에서 이 폴더의 README.md대로 answer.json을 만든 뒤 다시 실행하세요")
+                             "Claude Code·Codex에서 이 폴더의 README.md대로 answer.json을 만든 뒤 다시 실행하세요.")
         answer = match.structured_to_assignments(job, json.loads(answer_file.read_text()))
     else:
         if not opts.ai_key:
-            raise PaintError("AI 매칭에 쓸 API 키가 없습니다. 설정의 AI 연결에 키를 넣으세요")
+            raise PaintError("AI 매칭에 쓸 API 키가 없습니다. 설정의 AI 연결에 키를 넣으세요.")
         say(f"AI 매칭 중 (영역 {len(cand)}개)", 0.4)
         try:
             # 장면 이해(인물·부위) → 인물별 확대 검토 → 인물×부위 색을 차례로 묻는다
@@ -592,7 +592,7 @@ def paint(psd_path, out_path, opts=None, progress=None):
         region_key = assign_hints(labels, n, key_map, opts, dense=image_mode or opts.hint_source == "psd")
     except LineMismatch as e:
         if opts.ai_mode == "off":
-            raise PaintError(f"{e}. 다른 페이지 레퍼런스로 칠하려면 설정에서 AI 매칭을 켜세요") from None
+            raise PaintError(f"{e}. 다른 페이지 레퍼런스로 칠하려면 설정에서 AI 매칭을 켜세요.") from None
         region_key, keys, names, ai_usage = ai_match(e, labels, n, boundary, frame, opts, out_path, say)
         image_mode = False
     if image_mode:
@@ -613,7 +613,7 @@ def paint(psd_path, out_path, opts=None, progress=None):
     areas = np.bincount(labels.ravel(), minlength=n + 1)
     unhinted_large = int(((region_key < 0) & (areas >= opts.small_area))[1:].sum())
     if not (region_key >= 0).any():
-        raise PaintError("칠할 영역이 없습니다 (참고 힌트도 자동 칠하기도 없음)")
+        raise PaintError("칠할 영역이 없습니다 (참고 힌트도 자동 칠하기도 없음).")
     state = {"psd_path": str(psd_path), "out_path": str(out_path), "opts": opts, "labels": labels,
              "boundary": boundary, "region_key": region_key.copy(), "keys": list(keys), "names": list(names)}
     say("밑색 채우는 중", 0.6)
