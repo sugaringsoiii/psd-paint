@@ -305,7 +305,7 @@ class PresetsTab(QWidget):
         add_btn = button("추가", "ghost", "plus")
         add_btn.clicked.connect(lambda: self.add())  # clicked 의 checked 값이 name 으로 들어가지 않게
         import_btn = button("가져오기", "ghost", "download")
-        import_btn.setToolTip("포토샵 색상 견본(.aco·.ase)의 색을 한 번에 추가합니다.")
+        import_btn.setToolTip("포토샵 색상 견본(.aco·.ase)이나 클립스튜디오 컬러 세트(.cls)의 색을 한 번에 추가합니다.")
         import_btn.clicked.connect(self.import_palette)
         top = QHBoxLayout()
         top.addWidget(label("색상 프리셋", "section"))
@@ -417,7 +417,7 @@ class PresetsTab(QWidget):
 
     def import_palette(self):
         path, _ = QFileDialog.getOpenFileName(self, "색상 견본 가져오기", self.settings.value("last_dir", ""),
-                                              "색상 견본 (*.aco *.ase)")
+                                              "색상 견본 (*.aco *.ase *.cls)")
         if not path:
             return
         try:

@@ -1,23 +1,33 @@
-"""색상 견본 파일 읽기: 포토샵 .aco, Adobe Swatch Exchange .ase → [(이름, (r, g, b))]."""
+"""색상 견본 파일 읽기: 포토샵 .aco, Adobe Swatch Exchange .ase, 클립스튜디오 컬러 세트 .cls → [(이름, (r, g, b))]."""
 import colorsys
 import struct
 from pathlib import Path
 
 
 def read_palette(path):
-    """→ [(이름, (r, g, b))]. 이름이 없는 색은 '파일이름 n'. 모르는 형식이면 ValueError"""
+    """→ [(이름, (r, g, b))]. 이름이 없는 색은 '파일이름 n'. 모르는 형식이면 ValueError
+
+    이름 없는 색은 같은 색이 앞에 있으면 뺀다 (클립스튜디오 세트의 빈 칸은 같은 회색으로 수십 개 채워져 있다).
+    """
     path = Path(path)
     data = path.read_bytes()
     try:
         if data[:4] == b"ASEF":
             colors = _ase(data)
+        elif data[:4] == b"SLCC":
+            colors = _cls(data)
         elif path.suffix.lower() == ".aco":
             colors = _aco(data)
         else:
-            raise ValueError("포토샵 색상 견본(.aco)이나 .ase 파일만 읽을 수 있습니다")
+            raise ValueError("포토샵 색상 견본(.aco·.ase)이나 클립스튜디오 컬러 세트(.cls)만 읽을 수 있습니다.")
     except (struct.error, UnicodeDecodeError):  # 중간에 끊기거나 깨진 파일
-        raise ValueError("파일이 손상됐거나 형식이 다릅니다") from None
-    return [(name or f"{path.stem} {i}", rgb) for i, (name, rgb) in enumerate(colors, 1)]
+        raise ValueError("파일이 손상됐거나 형식이 다릅니다.") from None
+    seen, out = set(), []
+    for name, rgb in colors:
+        if name or rgb not in seen:
+            out.append((name or f"{path.stem} {len(out) + 1}", rgb))
+        seen.add(rgb)
+    return out
 
 
 def _rgb(space, v):
@@ -90,6 +100,27 @@ def _ase(data):
     return out
 
 
+def _cls(data):
+    """클립스튜디오 컬러 세트. 리틀 엔디언: 'SLCC', 판(2), 머리 길이(4)+머리(세트 이름),
+    4, 색 수(4), 남은 길이(4), 그다음 색마다 길이(4) + RGBA(4) + 이름 있음(4) [+ 이름 길이(2) + UTF-16 이름]."""
+    (head,) = struct.unpack_from("<I", data, 6)
+    pos = 10 + head
+    _, count, _ = struct.unpack_from("<III", data, pos)
+    pos += 12
+    out = []
+    for _ in range(count):
+        (size,) = struct.unpack_from("<I", data, pos)
+        entry = data[pos + 4:pos + 4 + size]
+        pos += 4 + size
+        r, g, b, _a, has_name = struct.unpack_from("<BBBBI", entry, 0)
+        name = ""
+        if has_name:
+            (n,) = struct.unpack_from("<H", entry, 8)
+            name = entry[10:10 + n].decode("utf-16-le")
+        out.append((name, (r, g, b)))
+    return out
+
+
 if __name__ == "__main__":  # 자체 점검: 만든 바이트를 다시 읽어 본다
     import tempfile
 
@@ -100,9 +131,18 @@ if __name__ == "__main__":  # 자체 점검: 만든 바이트를 다시 읽어 �
     name = utf16("파랑")
     block = struct.pack(">H", len(name) // 2) + name + b"RGB " + struct.pack(">3f", 0, 0, 1) + struct.pack(">H", 2)
     ase = b"ASEF" + struct.pack(">HHI", 1, 0, 1) + struct.pack(">HI", 1, len(block)) + block
+    title = "세트".encode("utf-8")
+    head = struct.pack("<H", len(title)) + title
+    named = bytes([0, 128, 0, 255]) + struct.pack("<I", 1) + struct.pack("<H", 4) + "초록".encode("utf-16-le")
+    blank = bytes([91, 91, 91, 255]) + struct.pack("<I", 0)
+    entries = [named, blank, blank]  # 빈 칸 회색은 한 번만 들어가야 한다
+    cls = b"SLCC" + struct.pack("<HI", 1, len(head)) + head + struct.pack("<III", 4, len(entries), 0)
+    cls += b"".join(struct.pack("<I", len(e)) + e for e in entries)
     with tempfile.TemporaryDirectory() as d:
         (Path(d) / "a.aco").write_bytes(aco)
         (Path(d) / "b.ase").write_bytes(ase)
         assert read_palette(Path(d) / "a.aco") == [("빨강", (255, 0, 0))]
         assert read_palette(Path(d) / "b.ase") == [("파랑", (0, 0, 255))]
+        (Path(d) / "c.cls").write_bytes(cls)
+        assert read_palette(Path(d) / "c.cls") == [("초록", (0, 128, 0)), ("c 2", (91, 91, 91))]
     print("ok")
