@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import (
     QByteArray,
+    QEvent,
     QEventLoop,
     QPoint,
     QRect,
@@ -303,6 +304,9 @@ class Popup(QWidget):
             lst.setCurrentRow(current)
         lst.itemClicked.connect(lambda it: self.done(it.data(Qt.UserRole)))
         if search:
+            # macOS 에서 Qt.Popup 창은 키 입력 창이 되지 못해 한글이 조합되지 않는다 (ㅇㅗㅐ…).
+            # 검색칸이 있으면 일반 창으로 띄우고, 바깥 클릭·다른 앱으로 가면 닫는 건 직접 한다
+            self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
             edit = search_box("이름·색 검색")
             max_h -= 36  # 검색칸만큼 목록을 줄인다
 
@@ -337,6 +341,21 @@ class Popup(QWidget):
         else:
             super().keyPressEvent(e)
 
+    def _is_popup(self):
+        return self.windowType() == Qt.Popup
+
+    def eventFilter(self, obj, e):
+        # 일반 창으로 띄운 팝업: 바깥을 누르면 Qt.Popup 처럼 그 클릭을 먹고 닫는다
+        if e.type() == QEvent.MouseButtonPress and self.isVisible() \
+                and not self.geometry().contains(e.globalPosition().toPoint()):
+            self.close()
+            return True
+        return False
+
+    def _app_state(self, state):  # 다른 앱으로 넘어가면 닫는다
+        if state != Qt.ApplicationActive:
+            self.close()
+
     def pick(self, pos):
         """카드 왼쪽 위를 pos(전역 좌표)에 맞춰 띄우고 고를 때까지 기다린다. → 고른 값, 취소면 False"""
         self.adjustSize()
@@ -348,9 +367,20 @@ class Popup(QWidget):
         loop = QEventLoop()
         self.destroyed.connect(loop.quit)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
+        popup = self._is_popup()
+        app = QApplication.instance()
+        if not popup:
+            app.installEventFilter(self)
+            app.applicationStateChanged.connect(self._app_state)
         self.show()
+        if not popup:
+            self.raise_()
+            self.activateWindow()
         while self.isVisible():
             loop.processEvents(QEventLoop.WaitForMoreEvents)
+        if not popup:
+            app.removeEventFilter(self)
+            app.applicationStateChanged.disconnect(self._app_state)
         return self.choice
 
 
