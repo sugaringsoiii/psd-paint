@@ -167,6 +167,9 @@ def paint_psd(psd_path: str, reference: str = "", output_dir: str = "", line_gro
         opts.hint_path = reference
     out_path = Path(psd_path) if overwrite else output_path(psd_path, output_dir or None, "_밑색")
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    if characters:
+        # 새로 칠하기다: 전에 이 파일을 칠할 때 남은 답은 쓰지 않는다 (답은 apply_characters로만 받는다)
+        (_job_folder(out_path) / "answer.json").unlink(missing_ok=True)
     return _run(psd_path, out_path, opts)
 
 
