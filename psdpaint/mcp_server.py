@@ -85,12 +85,7 @@ def _tile_sheet(folder, got):
 
 
 def _preview_images(result, width=720):
-    """칠한 결과 미리보기. PSD 옆에 PNG로 저장하고(어느 앱에서든 열어 볼 수 있게),
-    대화에는 컷 단위로 잘라 넣는다 (컷 사이 흰 여백에서 자르므로 작은 컷은 작게, 큰 컷은 잘리지 않게)."""
-    import numpy as np
-
-    from .characters import page_chunks
-
+    """칠한 결과 미리보기. PSD 옆에 PNG로 저장하고(어느 앱에서든 열어 볼 수 있게), 대화에는 통이미지 한 장으로 넣는다."""
     im = result.preview.convert("RGB")
     path = Path(result.out_path).with_name(Path(result.out_path).stem + "_미리보기.png")
     try:
@@ -99,16 +94,11 @@ def _preview_images(result, width=720):
                 "사용자에게 이 미리보기 그림을 보여 주세요 (PSD를 열지 않아도 결과를 볼 수 있게).")
     except OSError:
         note = ""
-    content = np.asarray(im.convert("L")) < 248
-    parts = []
-    for y0, y1, x0, x1 in page_chunks(content, gap=12):
-        piece = im.crop((x0, y0, x1, y1))
-        if piece.width > width:
-            piece = piece.resize((width, round(piece.height * width / piece.width)))
-        buf = io.BytesIO()
-        piece.save(buf, "PNG", optimize=True)
-        parts.append(Image(data=buf.getvalue(), format="png"))
-    return ([note] if note else []) + parts
+    if im.width > width:
+        im = im.resize((width, round(im.height * width / im.width)))
+    buf = io.BytesIO()
+    im.save(buf, "PNG", optimize=True)
+    return ([note] if note else []) + [Image(data=buf.getvalue(), format="png")]
 
 
 def _check_step(folder, state):
