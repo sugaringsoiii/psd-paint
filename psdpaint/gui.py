@@ -938,7 +938,7 @@ class MainWindow(QMainWindow):
         # 예전 레퍼런스 이미지·PSD 방식은 앱에서 뺐다 (결과가 나쁘고 요청만 많았다) → 참고 레이어로 돌린다
         (self.src_chars if s.value("hint_source", "layer") == "characters" else self.src_layer).setChecked(True)
         self.paint_via = Combo()
-        for text, key in (("Claude 데스크톱 — 구독, API 키 없음", "claude"), ("Codex (ChatGPT 앱)", "codex"),
+        for text, key in (("Claude 데스크톱 (Code 탭) — 구독, API 키 없음", "claude"), ("Codex (ChatGPT 앱)", "codex"),
                           ("Gemini CLI", "gemini"), ("이 앱에서 바로 — API 키, 요금 발생", "api")):
             self.paint_via.addItem(text, key)
         self.paint_via.setCurrentIndex(max(0, self.paint_via.findData(s.value("paint_via", "claude"))))
@@ -948,9 +948,10 @@ class MainWindow(QMainWindow):
         self.via_connect = QPushButton("연결하기")
         self.via_connect.setToolTip("psd-paint를 이 AI 앱의 MCP 서버로 등록합니다. 등록한 뒤 그 앱을 껐다 켜야 합니다.")
         self.via_connect.clicked.connect(self.connect_client)
-        self.via_note = label("[밑색 칠하기]를 누르면 이 앱이 열리고, 칠할 파일이 적힌 요청이 입력창에 들어가요. "
-                              "확인하고 보내면 AI가 칠해요.", "summary")
+        self.via_note = label("", "summary")
         self.via_note.setWordWrap(True)
+        self.via_note.setOpenExternalLinks(True)
+        self.via_note.setTextFormat(Qt.RichText)
         self.parts_method = Combo()
         for text, key in (("영역 확인 칸 — AI가 칸마다 답함 (기본)", "tiles"),
                           ("Gemini 이미지 지도 — Gemini 키 필요", "image")):
@@ -1218,6 +1219,12 @@ class MainWindow(QMainWindow):
             widget.setVisible(mcp)
         if mcp:
             name = clients.CLIENTS[via]
+            where = {"claude": "Claude 데스크톱의 Code 탭 새 세션이", "codex": "Codex 새 스레드가",
+                     "gemini": "터미널에서 Gemini CLI가"}[via]
+            self.via_note.setText(
+                f"[밑색 칠하기]를 누르면 {where} 열리고, 칠할 파일이 적힌 요청이 입력창에 들어가요. 확인하고 보내면 AI가 칠해요. "
+                f"<a href='{clients.GUIDES[via]}'>MCP 연결 가이드</a> · "
+                "<a href='https://github.com/sugaringsoiii/psd-paint/blob/main/GUIDE.md'>psd-paint 사용 가이드</a>")
             if not clients.installed(via):
                 self.via_status.setText(f"✕ {name}가 설치돼 있지 않아요")
                 self.via_connect.setEnabled(False)

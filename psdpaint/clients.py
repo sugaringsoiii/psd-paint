@@ -1,6 +1,7 @@
 """MCP로 psd-paint를 쓰는 AI 앱(Claude 데스크톱·Codex·Gemini CLI): 연결(등록)하고, 칠할 요청을 넣어 연다.
 
-- Claude 데스크톱: claude_desktop_config.json 의 mcpServers. 새 대화 링크 claude://claude.ai/new?q=…
+- Claude 데스크톱: claude_desktop_config.json 의 mcpServers. Code 탭 새 세션 링크 claude://code/new?q=…&folder=…
+  (도구를 여러 번 부르고 그림을 많이 보는 작업이라 채팅보다 Code 탭이 맞다. 데스크톱 MCP 서버는 Code 탭에서도 보인다)
 - Codex(ChatGPT 앱·CLI): ~/.codex/config.toml 의 [mcp_servers.psd-paint]. 새 스레드 링크 codex://new?prompt=…&path=…
 - Gemini CLI: ~/.gemini/settings.json 의 mcpServers. 터미널에서 gemini -i "…" 로 연다.
 링크는 요청을 입력창에 넣기만 하고 보내지 않는다 (사용자가 확인하고 보낸다).
@@ -17,6 +18,9 @@ from pathlib import Path
 
 SERVER = "psd-paint"
 CLIENTS = {"claude": "Claude 데스크톱", "codex": "Codex (ChatGPT 앱)", "gemini": "Gemini CLI"}
+GUIDES = {"claude": "https://modelcontextprotocol.io/docs/develop/connect-local-servers",
+          "codex": "https://developers.openai.com/codex/mcp",
+          "gemini": "https://geminicli.com/docs/tools/mcp-server/"}
 
 
 def server_command():
@@ -114,14 +118,17 @@ def register(client):
 def prompt_for(files):
     """칠할 파일 목록을 넣은 요청 글."""
     lines = "\n".join(f"- {f}" for f in files)
-    return ("psd-paint로 아래 PSD를 캐릭터 프리셋으로 밑색 칠해 줘. 파일마다 paint_psd(psd_path=…, characters=true)를 부르고, "
-            "돌려준 영역 확인 칸을 보고 apply_characters로 답해 줘.\n" + lines)
+    return ("psd-paint로 아래 PSD를 캐릭터 프리셋으로 밑색 칠해 줘. 파일마다 psd-paint의 paint_characters(psd_path=…)를 부르고, "
+            "돌려준 등장인물 그림과 영역 확인 칸을 보고 칸마다 부위·누구인지 apply_characters로 답해 줘.\n" + lines)
 
 
 def launch(client, prompt, folder=None):
     """요청을 입력창에 넣어 그 앱을 연다 (보내지는 않는다)."""
     if client == "claude":
-        _open_url("claude://claude.ai/new?q=" + urllib.parse.quote(prompt))
+        url = "claude://code/new?q=" + urllib.parse.quote(prompt)
+        if folder:
+            url += "&folder=" + urllib.parse.quote(str(folder))  # 앱이 이 폴더로 열지 한 번 묻는다
+        _open_url(url)
     elif client == "codex":
         url = "codex://new?prompt=" + urllib.parse.quote(prompt)
         if folder:

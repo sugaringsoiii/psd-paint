@@ -25,7 +25,8 @@ server = MCPServer(
         "레퍼런스에서 같은 인물의 부위별 팔레트를 골라 apply_match(people=…)를 호출한다. "
         "판단이 서지 않는 영역과 배경은 none으로 둔다. 엑스트라도 피부는 피부 팔레트를 고른다. "
         "apply_match가 돌려준 칠한 결과 지도를 보고 틀린 곳이 있으면 한 번 고쳐 다시 호출한다. "
-        "paint_psd(characters=true)는 캐릭터 프리셋 방식이다. 등장인물 대표 그림과 영역 확인 칸(영역마다 빨갛게 강조)을 돌려주면, "
+        "인물을 캐릭터 색으로 칠할 때는 paint_characters를 쓴다(paint_psd(characters=true)와 같다). "
+        "등장인물 대표 그림과 영역 확인 칸(영역마다 빨갛게 강조)을 돌려주면, "
         "칸마다 부위와 누구인지 적어 apply_characters(job, items=[...])를 호출한다. "
         "(앱 설정에서 Gemini 이미지 지도를 고른 경우에는 인물 그림을 돌려주니 apply_characters(job, people=[...])로 답한다.)"
     ),
@@ -56,6 +57,9 @@ def _job_folder(out_path):
 
 def _run(psd_path, out_path, opts):
     """칠하기를 실행한다. 다른 페이지 레퍼런스면 매칭 요청(이미지·지시문)을 돌려준다."""
+    import time
+
+    started = time.time() - 1
     try:
         result = paint(psd_path, out_path, opts)
     except AwaitingAnswer:
@@ -98,7 +102,8 @@ def _run(psd_path, out_path, opts):
         return f"실패: {e}"
     out = [_summary(result), _png(result.preview)]
     folder = _job_folder(out_path)
-    results = sorted(folder.glob("result_*.png")) if folder.exists() else []
+    # 이번 실행이 만든 결과 지도만 (예전 실행이 남긴 그림을 이번 결과로 보이지 않게)
+    results = sorted(p for p in folder.glob("result_*.png") if p.stat().st_mtime >= started) if folder.exists() else []
     if results:
         out.append("[칠한 결과 지도] 번호마다 칠한 색이다. 분홍색은 none(회색 자동)이다. 레퍼런스와 비교해 "
                    "틀린 번호(인물이 바뀐 색, 회색 피부, 덩어리 안 한 조각만 다른 색)가 있으면 그 번호만 "
@@ -192,6 +197,16 @@ def apply_match(job: str, people: list[dict] | None = None, objects: list[dict] 
     answer_file.write_text(json.dumps(answer, ensure_ascii=False, indent=1))
     opts = Options(**info["options"])
     return _run(info["psd_path"], info["out_path"], opts)
+
+
+@server.tool()
+def paint_characters(psd_path: str, output_dir: str = "", overwrite: bool = False, parts: str = ""):
+    """psd-paint 앱에 등록한 캐릭터(대표 그림·생김새·'캐릭터/부위' 색)로 인물 밑색을 칠한다.
+
+    등장인물 대표 그림과 영역 확인 칸을 돌려주니, 칸마다 부위·누구인지 적어 apply_characters(job, items=[…])를 호출한다.
+    결과는 원본이름_밑색.psd (overwrite면 원본)에 저장한다. paint_psd(characters=true)와 같다.
+    """
+    return paint_psd(psd_path, output_dir=output_dir, overwrite=overwrite, characters=True, parts=parts)
 
 
 @server.tool()

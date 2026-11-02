@@ -114,7 +114,7 @@ AI에 묻는 방법은 두 가지다.
 
 앱 설정의 **칠하는 곳**에서 Claude 데스크톱·Codex(ChatGPT 앱)·Gemini CLI를 고르면, [연결하기]가 각 앱 설정에 psd-paint를 등록하고
 (`claude_desktop_config.json`, `~/.codex/config.toml`, `~/.gemini/settings.json`, 원래 파일은 `.bak`으로 남긴다),
-[밑색 칠하기]가 칠할 파일이 적힌 요청을 넣어 그 앱을 연다 (`claude://claude.ai/new?q=…`, `codex://new?prompt=…&path=…`, 터미널에서 `gemini -i …`).
+[밑색 칠하기]가 칠할 파일이 적힌 요청을 넣어 그 앱을 연다 (Claude는 Code 탭 `claude://code/new?q=…&folder=…`, `codex://new?prompt=…&path=…`, 터미널에서 `gemini -i …`).
 요청은 입력창에 들어가기만 하고 보내지는 않는다. 코드는 `psdpaint/clients.py`.
 
 Claude 데스크톱·Claude Code에 psd-paint를 커넥터로 붙이면 API 키 없이 쓸 수 있다. 다른 페이지 레퍼런스는 클라이언트의 AI가 지도 이미지를 보고 직접 영역을 맞춘다.
@@ -124,6 +124,7 @@ Claude 데스크톱·Claude Code에 psd-paint를 커넥터로 붙이면 API 키 
 | `inspect_psd` | 레이어 구조(폴더·레이어 이름, 숨김 여부)를 보여 준다 |
 | `paint_psd` | 밑색을 칠해 `원본이름_밑색.psd`로 저장하고 미리보기를 돌려준다. 다른 페이지 레퍼런스면 레퍼런스·번호 지도 이미지를 돌려준다 |
 | `apply_match` | AI가 고른 영역별 팔레트를 적용해 칠한다 |
+| `paint_characters` | 앱에 등록한 캐릭터로 칠한다 (`paint_psd(characters=true)`와 같다). 등장인물 그림과 영역 확인 칸을 돌려준다 |
 | `apply_characters` | `paint_psd(characters=true)`의 요청에 답한다: 영역 확인 칸이면 `items`(칸마다 부위·누구인지, 고칠 칸만 다시 보내도 된다), 이미지 지도면 `people` |
 
 예: "이 PSD를 1화_3_밑색.psd 레퍼런스로 칠해 줘" → `paint_psd` → (AI가 이미지를 보고) `apply_match` → 완료
