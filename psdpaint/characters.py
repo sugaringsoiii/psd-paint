@@ -628,3 +628,39 @@ def from_tiles(answer, regions, n):
             person_of[r] = name
             who[name] = name
     return part_of, person_of, who, background
+
+
+def panel_backgrounds(labels, frame, margin=8):
+    """컷마다 컷 배경으로 볼 영역: 그 컷에서 가장 넓고, 컷의 위·아래·왼·오른 네 변에 모두 닿은 영역.
+
+    인물 클로즈업처럼 얼굴이 가장 넓은 컷은 얼굴이 네 변에 다 닿지 않으므로 고르지 않는다.
+    컷 바깥 페이지 여백도 같은 규칙으로 고른다. → {영역 번호}
+    """
+    import cv2
+
+    panels, k = ndimage.label(~(cv2.dilate(frame.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0))
+    m = labels > 0
+    n = int(labels.max())
+    # 영역마다 가장 많이 겹친 컷
+    pairs, counts = np.unique(labels[m].astype(np.int64) * (k + 1) + panels[m], return_counts=True)
+    lab, pan = pairs // (k + 1), pairs % (k + 1)
+    order = np.lexsort((-counts, lab))
+    lab, pan, counts = lab[order], pan[order], counts[order]
+    first = np.r_[True, lab[1:] != lab[:-1]]
+    panel_of = np.zeros(n + 1, np.int64)
+    panel_of[lab[first]] = pan[first]
+    areas = np.bincount(labels.ravel(), minlength=n + 1)
+    boxes = ndimage.find_objects(labels)
+    pboxes = ndimage.find_objects(panels)
+    out = set()
+    for p in range(1, k + 1):
+        regs = np.nonzero(panel_of == p)[0]
+        regs = regs[regs > 0]
+        if not regs.size or pboxes[p - 1] is None:
+            continue
+        r = int(regs[np.argmax(areas[regs])])
+        rb, pb = boxes[r - 1], pboxes[p - 1]
+        if (rb[0].start <= pb[0].start + margin and rb[0].stop >= pb[0].stop - margin
+                and rb[1].start <= pb[1].start + margin and rb[1].stop >= pb[1].stop - margin):
+            out.add(r)
+    return out

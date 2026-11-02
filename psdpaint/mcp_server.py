@@ -68,7 +68,7 @@ def _run(psd_path, out_path, opts):
         if (folder / "tiles.json").exists():
             info = json.loads((folder / "tiles.json").read_text())
             prompt = readme.split("\n\n", 2)[2].split("답은 schema.json")[0].strip()
-            out = [f"영역 확인이 필요합니다. 작업: {folder}\n"
+            out = [f"영역 확인이 필요합니다. 작업: {folder} (칸 {len(info['regions'])}개)\n"
                    "등장인물 대표 그림과 영역 확인 칸을 보고, 칸마다 부위·누구인지 적어 "
                    "apply_characters(job=위 경로, items=[{\"tile\", \"part\", \"character\"}, …]) 를 호출하세요.\n"]
             for i, name in enumerate(info["profiles"], 1):
@@ -153,6 +153,8 @@ def paint_psd(psd_path: str, reference: str = "", output_dir: str = "", line_gro
         settings = QSettings("psd-paint", "psd-paint")
         opts.hint_source, opts.characters = "characters", chars.from_app_settings()
         opts.ai_parts = parts or settings.value("parts_method", "tiles")
+        opts.tile_min_area = int(settings.value("tile_min_area", opts.tile_min_area))
+        opts.tile_auto_bg = str(settings.value("tile_auto_bg", True)).lower() not in ("false", "0")
         opts.ai_image_model = settings.value("image_model", chars.IMAGE_MODEL)
         opts.ai_image_key = ai.get_key("gemini") if opts.ai_parts == "image" else ""
     elif reference:

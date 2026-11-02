@@ -968,8 +968,18 @@ class MainWindow(QMainWindow):
         add("레퍼런스", hbox(self.hint_path, self.hint_browse))
         add("", ref_note)
         add("부위 나누기", self.parts_method)
+        parts_label = grid.itemAtPosition(row - 1, 0).widget()
+        self.tile_min = spin(100, 20000, s.value("tile_min_area", Options.tile_min_area, int), " px")
+        self.tile_min.setSingleStep(100)
+        self.tile_min.setToolTip("영역 확인 칸에 넣을 최소 넓이입니다. 더 작은 영역은 묻지 않고 둘레 색을 따릅니다.\n"
+                                 "올리면 칸·토큰이 줄고, 내리면 머리카락 틈 같은 작은 곳이 더 정확해집니다.")
+        add("칸 최소 넓이", self.tile_min)
+        tile_label = grid.itemAtPosition(row - 1, 0).widget()
+        self.tile_auto_bg = QCheckBox("컷 배경은 묻지 않고 비우기 (칸·토큰 절약)")
+        self.tile_auto_bg.setChecked(s.value("tile_auto_bg", True, bool))
+        add("", self.tile_auto_bg)
         add("", self.looks_note)
-        self.looks_row = (self.parts_method, self.looks_note, grid.itemAtPosition(row - 2, 0).widget())
+        self.looks_row = (self.parts_method, parts_label, self.tile_min, tile_label, self.tile_auto_bg, self.looks_note)
         self.parts_method.currentIndexChanged.connect(self.update_image_model)
         for b in (self.src_layer, self.src_image, self.src_psd, self.src_chars):
             b.toggled.connect(self.update_ref_enabled)
@@ -1143,6 +1153,8 @@ class MainWindow(QMainWindow):
         s.setValue("hint_source", self.hint_source())
         s.setValue("hint_path", self.hint_path.text())
         s.setValue("parts_method", self.parts_method.currentData())
+        s.setValue("tile_min_area", self.tile_min.value())
+        s.setValue("tile_auto_bg", self.tile_auto_bg.isChecked())
         s.setValue("image_model", self.image_model.currentData())
         pid = self.provider.currentData()
         s.setValue("provider", pid)
@@ -1170,6 +1182,8 @@ class MainWindow(QMainWindow):
             ai_check=self.ai_check.isChecked(),
             characters=characters.from_presets(self.presets.presets, profiles=self.characters_tab.profiles),
             ai_parts=self.parts_method.currentData(),
+            tile_min_area=self.tile_min.value(),
+            tile_auto_bg=self.tile_auto_bg.isChecked(),
             ai_image_model=self.image_model.currentData(),
             # 이미지 지도는 Gemini 이미지 모델이라 제공자와 상관없이 Gemini 키를 쓴다
             ai_image_key=((self.api_key.text().strip() if self.provider.currentData() == "gemini" else "")
@@ -1195,7 +1209,10 @@ class MainWindow(QMainWindow):
             widget.setVisible(self.src_chars.isChecked())
 
     def update_image_model(self):
-        self.image_model.setEnabled(self.parts_method.currentData() == "image")
+        tiles = self.parts_method.currentData() == "tiles"
+        self.image_model.setEnabled(not tiles)
+        self.tile_min.setEnabled(tiles)
+        self.tile_auto_bg.setEnabled(tiles)
 
     def update_out_enabled(self):
         over = self.overwrite.isChecked()

@@ -33,6 +33,8 @@ class Options:
     ai_image_model: str = "gemini-3.1-flash-lite-image"  # 캐릭터 방식에서 부위·사람을 칠해 나누는 이미지 모델 (Gemini)
     ai_image_key: str = ""              # 그 이미지 모델용 Gemini API 키 (실행할 때만 넘긴다)
     ai_parts: str = "image"             # 캐릭터 방식의 부위 나누기: image(Gemini 이미지 지도) · tiles(글 AI가 영역 확인 칸에 답)
+    tile_min_area: int = 1000           # 영역 확인 칸에 넣을 최소 넓이(px). 더 작은 영역은 묻지 않고 둘레를 따른다 (토큰 절약)
+    tile_auto_bg: bool = True           # 컷마다 둘레를 다 두른 가장 넓은 영역(컷 배경)은 묻지 않고 배경으로 둔다
     extra_boundary: list = field(default_factory=lambda: ["컷*", "*테두리*"])  # 경계로 쓸 픽셀 레이어 이름 패턴
     output_group: str = "밑색"
     gap_close_px: int = 2       # 선을 이만큼 두껍게 해서 작은 틈을 막는다
@@ -650,17 +652,21 @@ def _ask_or_wait(job, save, opts, folder, say, msg):
     return answer, dict(job.usage)
 
 
-def _tiles_match(labels, n, boundary, cand, chars, opts, folder, say):
+def _tiles_match(labels, n, boundary, frame, cand, chars, opts, folder, say):
     """영역 확인 칸: 글 AI가 영역마다 부위·누구인지 답한다 (그림 모델 없이)."""
     from . import characters
 
-    regions = characters.tile_regions(labels, cand)
+    areas = np.bincount(labels.ravel(), minlength=n + 1)
+    cand = cand[areas[cand] >= opts.tile_min_area]
+    auto_bg = characters.panel_backgrounds(labels, frame) if opts.tile_auto_bg else set()
+    regions = characters.tile_regions(labels, [r for r in cand if r not in auto_bg])
     say(f"영역 확인 칸 만드는 중 ({len(regions)}곳)", 0.4)
     sheets = characters.region_sheets(labels, boundary, regions)
     job, profiles = characters.tiles_job(sheets, chars, len(regions))
     answer, usage = _ask_or_wait(job, lambda: characters.save_tiles(job, profiles, regions, folder), opts, folder,
                                  say, "영역 확인")
     part_of, person_of, who, background = characters.from_tiles(answer, regions, n)
+    background[list(auto_bg)] = True
     return part_of, person_of, who, background, usage
 
 
@@ -715,8 +721,8 @@ def character_match(labels, n, boundary, frame, opts, out_path, say):
         raise PaintError("영역 확인 칸 방식은 AI가 답해야 합니다. 설정의 AI 매칭을 켜세요 (MCP는 자동).")
     try:
         if opts.ai_parts == "tiles":
-            part_of, person_of, who, background, usage = _tiles_match(labels, n, boundary, cand, chars, opts,
-                                                                       folder, say)
+            part_of, person_of, who, background, usage = _tiles_match(labels, n, boundary, frame, cand, chars,
+                                                                       opts, folder, say)
         else:
             part_of, person_of, who, background, usage, n = _image_match(labels, boundary, frame, cand, bg, chars,
                                                                            opts, folder, say)
