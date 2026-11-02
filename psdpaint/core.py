@@ -40,6 +40,7 @@ class Options:
     extra_boundary: list = field(default_factory=lambda: ["컷*", "*테두리*"])  # 경계로 쓸 픽셀 레이어 이름 패턴
     output_group: str = "밑색"
     gap_close_px: int = 2       # 선을 이만큼 두껍게 해서 작은 틈을 막는다
+    bridge_px: int = 40         # 큰 영역을 다시 나눌 때, 선 끝에서 이 거리 안의 선까지 곧은 선을 그어 끊긴 곳을 잇는다 (0이면 끔)
     small_area: int = 400       # 힌트 없는 이보다 작은 영역은 이웃 영역을 따른다
     min_hint_px: int = 5        # 영역 안 힌트 픽셀이 이보다 적으면 무시한다 (선 넘은 낙서 끝 방지)
     under_line_px: int = 9      # 선 아래로 밑색을 넓히는 거리
@@ -300,6 +301,85 @@ def lines_alpha(groups, psd, opts):
         with psdio.hidden(psdio.matching(g, opts.background)):
             line |= psdio.group_alpha(g, psd) > 80
     return line
+
+
+def thin(mask, rounds=8):
+    """선 마스크를 1px 뼈대로 깎는다 (Zhang-Suen). 선은 몇 번이면 다 깎이므로 rounds에서 멈춘다
+    (검게 칠한 넓은 면까지 다 깎으려면 수십 번 돌아야 해서 느리다)."""
+    ys, xs = np.nonzero(mask)
+    if not ys.size:
+        return np.zeros_like(mask, bool)
+    y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+    img = np.pad(mask[y0:y1, x0:x1].astype(np.uint8), 1)
+    for _ in range(rounds):
+        changed = False
+        for step in (0, 1):
+            p2, p3, p4 = img[:-2, 1:-1], img[:-2, 2:], img[1:-1, 2:]
+            p5, p6, p7 = img[2:, 2:], img[2:, 1:-1], img[2:, :-2]
+            p8, p9 = img[1:-1, :-2], img[:-2, :-2]
+            nb = [p2, p3, p4, p5, p6, p7, p8, p9]
+            b = sum(x.astype(np.int16) for x in nb)
+            a = sum(((nb[i] == 0) & (nb[(i + 1) % 8] == 1)).astype(np.int16) for i in range(8))
+            c = img[1:-1, 1:-1] == 1
+            if step == 0:
+                cond = (p2 * p4 * p6 == 0) & (p4 * p6 * p8 == 0)
+            else:
+                cond = (p2 * p4 * p8 == 0) & (p2 * p6 * p8 == 0)
+            kill = c & (b >= 2) & (b <= 6) & (a == 1) & cond
+            if kill.any():
+                img[1:-1, 1:-1][kill] = 0
+                changed = True
+        if not changed:
+            break
+    out = np.zeros(mask.shape, bool)
+    out[y0:y1, x0:x1] = img[1:-1, 1:-1].astype(bool)
+    return out
+
+
+def bridge_gaps(line, reach=40, back=10, cone=0.6):
+    """끊긴 선을 잇는 곧은 선. 선 끝마다 선이 뻗던 쪽(cone: 코사인 하한)으로 reach 안의 다른 선을 찾아 가장 가까운 곳까지 긋는다.
+
+    옆얼굴 윤곽처럼 크게 끊긴 선 사이로 얼굴과 배경이 한 영역이 되는 것을 막는다. 잇는 선은 영역을 나눌 때만 쓴다.
+    """
+    from scipy.spatial import cKDTree
+
+    sk = thin(line)
+    comp, _ = ndimage.label(sk, structure=np.ones((3, 3)))
+    nbr = ndimage.convolve(sk.astype(np.uint8), np.ones((3, 3), np.uint8), mode="constant") - sk
+    ends = np.argwhere(sk & (nbr == 1))
+    pts = np.argwhere(sk)
+    if not len(ends) or not len(pts):
+        return np.zeros_like(line)
+    tree = cKDTree(pts)
+    out = np.zeros(line.shape, np.uint8)
+    for y, x in ends:
+        # 선이 뻗던 방향: 끝에서 back px 안의 같은 선 점들의 평균에서 끝으로
+        near = tree.query_ball_point((y, x), back)
+        same = [pts[i] for i in near if comp[tuple(pts[i])] == comp[y, x]]
+        if len(same) < 3:
+            continue
+        d = np.array((y, x), float) - np.mean(same, axis=0)
+        if not np.hypot(*d):
+            continue
+        d /= np.hypot(*d)
+        best, best_score = None, None
+        for i in tree.query_ball_point((y, x), reach):
+            q = pts[i]
+            if comp[tuple(q)] == comp[y, x]:
+                continue
+            v = q - (y, x)
+            dist = np.hypot(*v)
+            if dist < 2:
+                continue
+            cos = (v @ d) / dist
+            if cos < cone:
+                continue
+            score = dist * (2 - cos)  # 가깝고 곧을수록 좋다
+            if best_score is None or score < best_score:
+                best, best_score = q, score
+        if best is not None:
+            cv2.line(out, (int(x), int(y)), (int(best[1]), int(best[0])), 1, 2)
+    return out > 0
 
 
 def close_frames(frame, band=8, cover=0.6, min_side=150):
@@ -688,20 +768,32 @@ def _ask_or_wait(job, save, opts, folder, say, msg):
     return answer, dict(job.usage)
 
 
-def split_leaks(labels, boundary, opts):
-    """선이 크게 열려 한 영역으로 이어진 큰 덩어리(옆얼굴과 컷 배경 등)를 틈을 더 닫아 다시 나눈다.
+def split_leaks(labels, boundary, opts, line=None, background=None):
+    """선이 크게 열려 한 영역으로 이어진 큰 덩어리(옆얼굴과 컷 배경 등)를 다시 나눈다.
 
-    전체를 크게 닫으면 눈·가는 머리카락 같은 작은 영역이 선에 묻히므로, leak_min_area보다 넓은 영역만 나눈다.
+    배경으로 본 영역(background, 영역 번호 집합) 안에서만 선 끝을 곧은 선으로 이어(bridge_px) 나눈다.
+    사람 안쪽(머리카락 결 등)은 건드리지 않으므로 칸이 늘지 않는다. 선 정보가 없으면 틈을 leak_gap_px만큼 더 닫아 나눈다.
     labels를 고친다. → 새 영역 수
     """
     n = int(labels.max())
-    if opts.leak_gap_px <= 0:
-        return n
-    heavy, _ = ndimage.label(~(cv2.dilate(boundary.astype(np.uint8), _disk(1), iterations=opts.leak_gap_px) > 0))
     areas = np.bincount(labels.ravel(), minlength=n + 1)
+    big = np.nonzero(areas >= opts.leak_min_area)[0]
+    big = big[big > 0]
+    if background is not None:
+        big = np.array([r for r in big if r in background], int)
+    if not big.size or (opts.bridge_px <= 0 and opts.leak_gap_px <= 0):
+        return n
+    closed = cv2.dilate(boundary.astype(np.uint8), _disk(1), iterations=opts.gap_close_px) > 0
+    if line is not None and opts.bridge_px > 0:
+        inside = np.isin(labels, big)
+        # 배경 쪽에 닿은 선 끝만 잇도록, 선은 큰 영역 둘레만 남겨 깎는다
+        near = cv2.dilate(inside.astype(np.uint8), _disk(3), iterations=8) > 0
+        heavy, _ = ndimage.label(~(closed | (bridge_gaps(line & near, opts.bridge_px) & inside)))
+    else:
+        heavy, _ = ndimage.label(~(cv2.dilate(boundary.astype(np.uint8), _disk(1), iterations=opts.leak_gap_px) > 0))
     boxes = ndimage.find_objects(labels)
-    for r in np.nonzero(areas >= opts.leak_min_area)[0]:
-        if r == 0 or boxes[r - 1] is None:
+    for r in big:
+        if boxes[r - 1] is None:
             continue
         sl = boxes[r - 1]
         m = labels[sl] == r
@@ -726,7 +818,9 @@ def _tiles_match(labels, n, boundary, frame, cand, chars, opts, folder, say):
     """영역 확인 칸: 글 AI가 영역마다 부위·누구인지 답한다 (그림 모델 없이)."""
     from . import characters
 
-    n0, n = n, split_leaks(labels, boundary, opts)
+    # 컷 배경으로 보이는 큰 영역만 선 끝을 이어 다시 나눈다 (열린 옆얼굴이 배경과 한 영역일 때)
+    n0, n = n, split_leaks(labels, boundary, opts, line=boundary & ~frame,
+                           background=characters.panel_backgrounds(labels, frame))
     cand = np.r_[cand, np.arange(n0 + 1, n + 1)]  # 나눠서 새로 생긴 영역
     areas = np.bincount(labels.ravel(), minlength=n + 1)
     cand = cand[areas[cand] >= opts.tile_min_area]
