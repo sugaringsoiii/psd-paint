@@ -16,6 +16,9 @@ from psdpaint import __version__  # noqa: E402
 
 NAME = "psd-paint"
 SEP = ";" if sys.platform == "win32" else ":"
+FOLDER_KEYS = [("NSDownloadsFolderUsageDescription", "다운로드 폴더"), ("NSDesktopFolderUsageDescription", "데스크탑 폴더"),
+               ("NSDocumentsFolderUsageDescription", "문서 폴더"), ("NSRemovableVolumesUsageDescription", "외장 디스크"),
+               ("NSNetworkVolumesUsageDescription", "네트워크 폴더")]
 
 
 def main():
@@ -44,6 +47,14 @@ def main():
         plist = app / "Contents" / "Info.plist"
         subprocess.run(["plutil", "-replace", "CFBundleShortVersionString", "-string", __version__, str(plist)], check=True)
         subprocess.run(["plutil", "-replace", "CFBundleVersion", "-string", __version__, str(plist)], check=True)
+        # 다운로드·데스크탑·문서 폴더에 결과를 저장할 때 macOS 가 묻는 창의 설명
+        for key, where in FOLDER_KEYS:
+            subprocess.run(["plutil", "-replace", key, "-string", f"{where}의 PSD를 읽고 밑색 결과를 저장합니다.",
+                            str(plist)], check=True)
+        # Info.plist 를 고치면 PyInstaller 가 해 둔 서명이 깨진다. 서명이 깨진 앱은 macOS 가 '손상됨'으로 보고
+        # 보호 폴더(다운로드 등) 쓰기를 묻지도 않고 막는다(Operation not permitted). 그래서 다시 서명한다
+        subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app)], check=True)
+        subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
         # 설치 화면: .app과 응용 프로그램 폴더 바로가기를 담은 디스크 이미지
         stage = dist / "dmg"
         shutil.rmtree(stage, ignore_errors=True)

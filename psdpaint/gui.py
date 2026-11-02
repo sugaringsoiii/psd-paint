@@ -125,7 +125,10 @@ class Worker(QObject):
             except PaintError as e:
                 self.failed_file.emit(row, str(e))
             except FileNotFoundError:
-                self.failed_file.emit(row, "파일을 찾을 수 없습니다")
+                self.failed_file.emit(row, "파일을 찾을 수 없습니다.")
+            except PermissionError as e:  # macOS 가 다운로드·데스크탑 같은 보호 폴더 쓰기를 막은 경우
+                self.failed_file.emit(row, f"저장할 권한이 없습니다: {e.filename}. 시스템 설정 → 개인정보 보호 및 보안 → "
+                                           "파일 및 폴더에서 psd-paint를 허용하거나, 설정에서 결과 폴더를 바꾸세요.")
             except Exception as e:  # 한 파일이 실패해도 다음 파일은 계속한다
                 traceback.print_exc()
                 self.failed_file.emit(row, str(e) or type(e).__name__)
