@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 import threading
 from dataclasses import replace
 
-from . import __version__, ai, style, updater
+from . import __version__, ai, characters, style, updater
 from .palette import read_palette
 from .widgets import (MOD, ColorPicker, Combo, Dialog, RoundScroll, Tip, button, card, color_field,
                       Popup, clear_layout, hbox0, icon, label, search_box,
@@ -816,10 +816,14 @@ class MainWindow(QMainWindow):
         self.src_image = QRadioButton("레퍼런스 이미지 (PNG·JPG) · AI")
         self.src_psd = QRadioButton("레퍼런스 PSD (캐릭터 시트·채색 참고) · AI")
         self.src_psd.setToolTip("밑색이 칠해진 PSD. 그 안의 '밑색'(또는 '참고') 폴더 레이어 이름과 색을 그대로 씁니다.")
+        self.src_chars = QRadioButton("캐릭터 프리셋 · AI")
+        self.src_chars.setToolTip("이미지 모델이 부위·인물을 나누고, AI가 누구인지 알아본 뒤 색상 프리셋의\n"
+                                  "'캐릭터/부위' 색(예: 하늘/머리, 하늘/재킷)으로 칠합니다. Gemini API 키가 필요합니다.")
         src_group = QButtonGroup(w)
-        for b in (self.src_layer, self.src_image, self.src_psd):
+        for b in (self.src_layer, self.src_image, self.src_psd, self.src_chars):
             src_group.addButton(b)
-        {"image": self.src_image, "psd": self.src_psd}.get(s.value("hint_source", "layer"), self.src_layer).setChecked(True)
+        {"image": self.src_image, "psd": self.src_psd, "characters": self.src_chars}.get(
+            s.value("hint_source", "layer"), self.src_layer).setChecked(True)
         self.hint_path = QLineEdit(s.value("hint_path", ""))
         self.hint_path.setPlaceholderText("레퍼런스 파일")
         self.hint_browse = QPushButton("찾기")
@@ -827,11 +831,20 @@ class MainWindow(QMainWindow):
         ref_note = label("다른 페이지·캐릭터 시트는 AI가 인물과 부위를 맞춰 칠합니다 (아래 AI 연결). "
                          "같은 페이지를 칠한 레퍼런스면 AI 없이 바로 칠합니다.", "summary")
         ref_note.setWordWrap(True)
+        self.looks = QPlainTextEdit(s.value("character_looks", ""))
+        self.looks.setPlaceholderText("하늘: 밝은 갈색 곱슬머리, 고양이 귀 머리띠, 귀 피어싱\n윤재: 짧은 흑발 생머리, 날카로운 눈매")
+        self.looks.setFixedHeight(84)
+        self.looks_note = label("한 줄에 한 명씩 '이름: 생김새'로 적습니다. 색은 색상 프리셋 탭에 "
+                                "'이름/부위'(머리·피부·재킷·조끼·셔츠·넥타이·바지 …)로 넣습니다.", "summary")
+        self.looks_note.setWordWrap(True)
         section("참고 방식")
-        add("방식", vbox(self.src_layer, self.src_image, self.src_psd), top=True)
+        add("방식", vbox(self.src_layer, self.src_image, self.src_psd, self.src_chars), top=True)
         add("레퍼런스", hbox(self.hint_path, self.hint_browse))
         add("", ref_note)
-        for b in (self.src_layer, self.src_image, self.src_psd):
+        add("캐릭터", self.looks, top=True)
+        add("", self.looks_note)
+        self.looks_row = (self.looks, self.looks_note, grid.itemAtPosition(row - 2, 0).widget())
+        for b in (self.src_layer, self.src_image, self.src_psd, self.src_chars):
             b.toggled.connect(self.update_ref_enabled)
         self.update_ref_enabled()
 
@@ -954,6 +967,13 @@ class MainWindow(QMainWindow):
         self.ai_check = QCheckBox("영역을 하나씩 강조해 머리카락·피부·옷을 다시 확인 (요청 1회 추가)")
         self.ai_check.setChecked(s.value("ai_check", True, bool))
         add("영역 확인", self.ai_check)
+        self.image_model = Combo()
+        for m in characters.IMAGE_MODELS:
+            self.image_model.addItem(m, m)
+        self.image_model.setCurrentIndex(max(0, self.image_model.findData(s.value("image_model", characters.IMAGE_MODEL))))
+        self.image_model.setToolTip("캐릭터 프리셋 방식에서 부위·인물을 칠해 나누는 Gemini 이미지 모델입니다.\n"
+                                    "Lite가 가장 싸고 빠릅니다. 제공자와 상관없이 Gemini 키를 씁니다.")
+        add("이미지 모델", self.image_model)
         add("제공자", self.provider)
         add("모델", hbox(self.model, self.list_btn))
         add("API 키", hbox(self.api_key, self.test_btn))
@@ -994,6 +1014,8 @@ class MainWindow(QMainWindow):
         s.setValue("gap", self.gap.value())
         s.setValue("hint_source", self.hint_source())
         s.setValue("hint_path", self.hint_path.text())
+        s.setValue("character_looks", self.looks.toPlainText())
+        s.setValue("image_model", self.image_model.currentData())
         pid = self.provider.currentData()
         s.setValue("provider", pid)
         s.setValue("ai_mode", self.ai_mode.currentData())
@@ -1018,6 +1040,11 @@ class MainWindow(QMainWindow):
             ai_review=self.ai_review.isChecked(),
             ai_zoom=self.ai_zoom.isChecked(),
             ai_check=self.ai_check.isChecked(),
+            characters=characters.from_presets(self.presets.presets, characters.parse_looks(self.looks.toPlainText())),
+            ai_image_model=self.image_model.currentData(),
+            # 부위 나누기는 Gemini 이미지 모델이라 제공자와 상관없이 Gemini 키를 쓴다
+            ai_image_key=(self.api_key.text().strip() if self.provider.currentData() == "gemini" else "")
+            or ai.get_key("gemini"),
             extra_boundary=patterns(self.boundary),
             background=patterns(self.background),
             hide_background=self.hide_bg.isChecked(),
@@ -1028,12 +1055,15 @@ class MainWindow(QMainWindow):
         )
 
     def hint_source(self):
-        return "image" if self.src_image.isChecked() else "psd" if self.src_psd.isChecked() else "layer"
+        return ("image" if self.src_image.isChecked() else "psd" if self.src_psd.isChecked()
+                else "characters" if self.src_chars.isChecked() else "layer")
 
     def update_ref_enabled(self):
-        on = not self.src_layer.isChecked()
+        on = self.src_image.isChecked() or self.src_psd.isChecked()
         self.hint_path.setEnabled(on)
         self.hint_browse.setEnabled(on)
+        for widget in self.looks_row:
+            widget.setVisible(self.src_chars.isChecked())
 
     def update_out_enabled(self):
         over = self.overwrite.isChecked()

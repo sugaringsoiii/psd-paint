@@ -31,6 +31,9 @@ def main(argv=None):
     ap.add_argument("--no-auto", action="store_true", help="힌트 없는 영역을 자동으로 칠하지 않는다")
     ap.add_argument("--ref-image", help="레퍼런스 이미지(PNG·JPG). 다른 페이지면 AI 매칭")
     ap.add_argument("--ref-psd", help="레퍼런스 PSD(캐릭터 시트·채색 참고). 다른 페이지면 AI 매칭")
+    ap.add_argument("--characters", action="store_true",
+                    help="캐릭터 프리셋으로 칠한다 (앱에 저장한 '캐릭터/부위' 색상 프리셋·생김새를 쓴다, Gemini 키 필요)")
+    ap.add_argument("--image-model", default=Options.ai_image_model, help="캐릭터 방식에서 부위를 나눌 Gemini 이미지 모델")
     ap.add_argument("--ai", choices=["off", "api", "files"], default="api",
                     help="다른 페이지 레퍼런스 처리: api(Claude API) · files(요청 폴더 만들기) · off")
     ap.add_argument("--ai-model", default=Options.ai_model)
@@ -53,6 +56,11 @@ def main(argv=None):
     if args.ai == "api":
         from . import ai
         opts.ai_key = os.environ.get("ANTHROPIC_API_KEY") or ai.get_key("claude")
+    if args.characters:
+        from . import ai, characters
+        opts.hint_source, opts.characters = "characters", characters.from_app_settings()
+        opts.ai_image_model = args.image_model
+        opts.ai_image_key = os.environ.get("GEMINI_API_KEY") or ai.get_key("gemini")
     failed = waiting = 0
     for i, f in enumerate(args.files, 1):
         dst = Path(f) if args.overwrite else output_path(f, args.out, args.suffix)

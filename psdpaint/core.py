@@ -19,6 +19,7 @@ class Options:
     line_group: str = "선화"            # 선화 레이어가 든 폴더 이름
     hint_group: str = "참고"            # 힌트 폴더(또는 레이어) 이름
     hint_source: str = "layer"          # 힌트 출처: layer(파일 안 참고 레이어) · image(레퍼런스 이미지) · psd(레퍼런스 PSD)
+                                        # · characters(캐릭터 프리셋 + AI)
     hint_path: str = ""                 # image·psd 방식의 레퍼런스 파일 경로
     ai_mode: str = "off"                # 다른 페이지 레퍼런스 처리: off(멈춤) · api(AI API에 묻기) · files(요청 폴더로 내보내기)
     ai_provider: str = "claude"
@@ -28,6 +29,9 @@ class Options:
                                         # 구조화 매칭에서는 없는 오류를 지어내 오히려 망치는 일이 있어 기본으로 끈다
     ai_zoom: bool = True                # 인물마다 크게 잘라 부위 나누기를 다시 검토한다 (요청 1회 추가)
     ai_check: bool = True               # 넓은 영역을 하나씩 강조해 머리카락·피부·옷을 다시 확인한다 (요청 1회 추가)
+    characters: list = field(default_factory=list)  # 캐릭터 프리셋 [{"name", "look", "colors": {부위: rgb}}]
+    ai_image_model: str = "gemini-3.1-flash-lite-image"  # 캐릭터 방식에서 부위·사람을 칠해 나누는 이미지 모델 (Gemini)
+    ai_image_key: str = ""              # 그 이미지 모델용 Gemini API 키 (실행할 때만 넘긴다)
     extra_boundary: list = field(default_factory=lambda: ["컷*", "*테두리*"])  # 경계로 쓸 픽셀 레이어 이름 패턴
     output_group: str = "밑색"
     gap_close_px: int = 2       # 선을 이만큼 두껍게 해서 작은 틈을 막는다
@@ -625,6 +629,55 @@ def ai_match(mismatch, labels, n, boundary, frame, opts, out_path, say):
     return region_key, keys, names, job.usage
 
 
+def character_match(labels, n, boundary, frame, opts, out_path, say):
+    """캐릭터 프리셋으로 칠한다: 이미지 모델이 부위·사람을 나누고, AI가 누구인지 고르고, 색은 프리셋에서.
+
+    → (영역별 키, 키 목록, 레이어 이름 순서, 사용량)
+    """
+    from . import characters, match
+
+    chars = [c for c in opts.characters if c.get("colors")]
+    if not chars:
+        raise PaintError("캐릭터 프리셋이 없습니다. 색상 프리셋에 '캐릭터/부위' 이름으로 색을 넣으세요 (예: 하늘/머리).")
+    areas = np.bincount(labels.ravel(), minlength=n + 1)
+    bg = find_background(labels, n, frame, np.full(n + 1, -1, np.int64), opts)
+    cand = np.nonzero((areas >= opts.small_area) & ~bg)[0]
+    cand = cand[cand > 0]
+    folder = Path(out_path).with_name(Path(out_path).stem + "_AI매칭")
+    answer_file = folder / "answer.json"
+    if folder.exists() and not (opts.ai_mode == "files" and answer_file.exists()):
+        # 새로 묻는다: 전에 만든 지도·답은 지운다 (요청 폴더 방식에서 답을 받은 뒤 다시 실행할 때만 그대로 쓴다)
+        for old in [*folder.glob("parts_*.png"), *folder.glob("persons_*.png"), *folder.glob("person_*.png"), answer_file]:
+            old.unlink(missing_ok=True)
+    try:
+        part_of, person_of, crops, usage = characters.image_maps(
+            labels, boundary, cand, opts.ai_image_key, opts.ai_image_model, folder, lambda msg: say(msg, 0.4))
+        who = {}
+        if crops and opts.ai_mode != "off":
+            job = characters.identify_job(crops, chars)
+            if opts.ai_mode == "files":
+                if not answer_file.exists():
+                    characters.save_identify(job, crops, folder)
+                    raise AwaitingAnswer(f"인물 알아보기 요청을 만들었습니다: {folder}. "
+                                         "Claude Code·Codex에서 이 폴더의 README.md대로 answer.json을 만든 뒤 다시 실행하세요.")
+                answer = json.loads(answer_file.read_text())
+            else:
+                if not opts.ai_key:
+                    raise PaintError("인물을 알아볼 AI의 API 키가 없습니다. 설정의 AI 연결에 키를 넣으세요.")
+                say("AI가 인물 알아보는 중", 0.45)
+                answer = match.ask(job, opts.ai_provider, opts.ai_key, opts.ai_model)
+                usage = {"model": f"{usage['model']} + {job.usage.get('model', opts.ai_model)}",
+                         "input": usage["input"] + job.usage.get("input", 0),
+                         "output": usage["output"] + job.usage.get("output", 0), "calls": usage["calls"] + 1}
+                characters.save_identify(job, crops, folder)
+                answer_file.write_text(json.dumps(answer, ensure_ascii=False, indent=1))
+            who = {p["person"]: p["character"] for p in answer.get("people", [])}
+    except RuntimeError as e:
+        raise PaintError(f"캐릭터 매칭 실패: {e}") from None
+    region_key, keys, names = characters.assign(part_of, person_of, who, chars, n)
+    return region_key, keys, names, usage
+
+
 def paint(psd_path, out_path, opts=None, progress=None):
     """psd_path에 힌트대로 밑색을 넣어 out_path로 저장한다. progress(단계 설명, 0~1)를 부른다."""
     opts = opts or Options()
@@ -638,15 +691,19 @@ def paint(psd_path, out_path, opts=None, progress=None):
     line_group, boundary, frame, labels, n = segment(psd, opts)
     say("참고 레이어 읽는 중", 0.3)
     ai_usage = {}
-    try:
-        key_map, keys, names, image_mode = read_hints(psd, opts, psd_path, boundary)
-        say("영역에 힌트 대응하는 중", 0.4)
-        region_key = assign_hints(labels, n, key_map, opts, dense=image_mode or opts.hint_source == "psd")
-    except LineMismatch as e:
-        if opts.ai_mode == "off":
-            raise PaintError(f"{e}. 다른 페이지 레퍼런스로 칠하려면 설정에서 AI 매칭을 켜세요.") from None
-        region_key, keys, names, ai_usage = ai_match(e, labels, n, boundary, frame, opts, out_path, say)
+    if opts.hint_source == "characters":
+        region_key, keys, names, ai_usage = character_match(labels, n, boundary, frame, opts, out_path, say)
         image_mode = False
+    else:
+        try:
+            key_map, keys, names, image_mode = read_hints(psd, opts, psd_path, boundary)
+            say("영역에 힌트 대응하는 중", 0.4)
+            region_key = assign_hints(labels, n, key_map, opts, dense=image_mode or opts.hint_source == "psd")
+        except LineMismatch as e:
+            if opts.ai_mode == "off":
+                raise PaintError(f"{e}. 다른 페이지 레퍼런스로 칠하려면 설정에서 AI 매칭을 켜세요.") from None
+            region_key, keys, names, ai_usage = ai_match(e, labels, n, boundary, frame, opts, out_path, say)
+            image_mode = False
     if image_mode:
         # 칠한 예시 이미지는 배경도 흰색으로 칠해져 있다. 흰색 영역 중 배경으로 보이는 곳은 비운다
         white = np.array([min(rgb) >= 245 for _, rgb in keys] + [False])
