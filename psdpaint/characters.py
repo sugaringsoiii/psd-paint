@@ -791,3 +791,27 @@ def smooth_people(labels, person_of, part_of, pairs, share=0.8, ratio=0.2):
                 person_of[m] = best
             changed += len(members)
     return changed
+
+
+def check_maps(state, regions, width=900):
+    """검수용 결과 지도: 칠한 색 위에 영역 확인 칸 번호를 얹는다. 컷 단위로 나눠 돌려준다. → [이미지]"""
+    from PIL import ImageDraw
+
+    labels, region_key, keys = state["labels"], state["region_key"], state["keys"]
+    lut = np.array([(255, 255, 255)] + [rgb for _, rgb in keys], np.uint8)
+    rgb = lut[(region_key + 1)[labels]]
+    rgb[state["boundary"]] = 0
+    img = Image.fromarray(rgb)
+    draw = ImageDraw.Draw(img)
+    font = match._font(34)
+    depth = ndimage.distance_transform_edt(labels > 0)
+    spots = ndimage.maximum_position(depth, labels, index=regions)
+    for t, (y, x) in enumerate(spots, 1):
+        draw.text((x, y), str(t), fill=(220, 0, 0), font=font, anchor="mm", stroke_width=4, stroke_fill=(255, 255, 255))
+    out = []
+    for y0, y1, x0, x1 in page_chunks(np.isin(labels, regions) | state["boundary"]):  # 컷 전체가 보이게
+        piece = img.crop((x0, y0, x1, y1))
+        if piece.width > width:
+            piece = piece.resize((width, round(piece.height * width / piece.width)), Image.LANCZOS)
+        out.append(piece)
+    return out

@@ -85,6 +85,25 @@ def _preview_images(result, width=720, max_h=1400):
     return ([note] if note else []) + parts
 
 
+def _check_step(folder, state):
+    """칸 답으로 칠한 뒤 한 번 검수하게 한다: 칠한 결과 위에 칸 번호를 얹어 보여 주고, 틀린 칸만 다시 받는다."""
+    from .characters import check_maps
+
+    info = json.loads((folder / "tiles.json").read_text())
+    answer = json.loads((folder / "answer.json").read_text())
+    if answer.get("checked"):  # 이미 한 번 검수했으면 다시 묻지 않는다
+        return []
+    out = ["[검수] 칠한 결과 위에 칸 번호를 얹었습니다. 등장인물 대표 그림과 견주어 색이 틀린 칸만 "
+           f"apply_characters(job={folder}, items=[…], checked=true)로 다시 보내세요. 예: 손·얼굴이 옷 색, "
+           "한 사람의 옷 일부가 다른 사람 색, 재킷인데 셔츠 색. 고칠 칸이 없으면 apply_characters(job, items=[], checked=true)를 "
+           "부르거나 그대로 끝내세요. 한 번만 확인합니다."]
+    for i, im in enumerate(check_maps(state, info["regions"]), 1):
+        path = folder / f"check_{i}.png"
+        im.convert("RGB").save(path)
+        out += [f"[칠한 결과 {i}]", Image(path=path)]
+    return out
+
+
 def _summary(result):
     lines = [f"저장: {result.out_path}", f"밑색 레이어: {', '.join(result.layers)}"]
     if result.auto:
@@ -136,6 +155,8 @@ def _run(psd_path, out_path, opts):
         return f"실패: {e}"
     out = [_summary(result)] + _preview_images(result)
     folder = _job_folder(out_path)
+    if (folder / "tiles.json").exists() and (folder / "answer.json").exists() and result.state:
+        out += _check_step(folder, result.state)
     # 이번 실행이 만든 결과 지도만 (예전 실행이 남긴 그림을 이번 결과로 보이지 않게)
     results = sorted(p for p in folder.glob("result_*.png") if p.stat().st_mtime >= started) if folder.exists() else []
     if results:
@@ -249,13 +270,15 @@ def paint_characters(psd_path: str, output_dir: str = "", overwrite: bool = Fals
 
 
 @server.tool()
-def apply_characters(job: str, items: list[dict] | None = None, people: list[dict] | None = None):
+def apply_characters(job: str, items: list[dict] | None = None, people: list[dict] | None = None,
+                     checked: bool = False):
     """paint_psd(characters=true)의 요청에 답하고 칠한다.
 
     - job: paint_psd가 알려 준 작업 폴더 경로
     - items: 영역 확인 칸의 답. [{"tile": 칸 번호, "part": 부위·사물·배경, "character": 등장인물 이름·모름·없음}]
       판을 한 장씩 받는다: 받은 판의 칸만 답하면 다음 판을 돌려주고, 모든 칸이 모이면 칠한다.
       칠한 뒤 고칠 때는 바꿀 칸만 다시 보내도 된다 (전 답에 덮어쓴다).
+    - checked: 칠한 결과를 보고 고친 답이면 true (검수 지도를 다시 보여 주지 않는다)
     - people: 이미지 지도 방식의 인물 답. [{"person": "1A", "character": 등장인물 이름 또는 "모름", "reason": 짧은 근거}]
     """
     folder = Path(job)
@@ -275,7 +298,7 @@ def apply_characters(job: str, items: list[dict] | None = None, people: list[dic
         old = json.loads(answer_file.read_text()).get("items", []) if answer_file.exists() else []
         merged = {int(it["tile"]): it for it in old}
         merged.update({int(it["tile"]): it for it in items})
-        answer = {"items": [merged[k] for k in sorted(merged)]}
+        answer = {"items": [merged[k] for k in sorted(merged)], "checked": checked}
     else:
         answer = {"people": people or []}
     answer_file.write_text(json.dumps(answer, ensure_ascii=False, indent=1))
