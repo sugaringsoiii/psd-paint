@@ -115,9 +115,10 @@ def _check_step(folder, state):
     answer = json.loads((folder / "answer.json").read_text())
     if answer.get("checked"):  # 이미 한 번 검수했으면 다시 묻지 않는다
         return []
-    out = ["[검수] 칠한 결과 위에 칸 번호를 얹었습니다. 등장인물 대표 그림과 견주어 색이 틀린 칸만 "
+    out = ["[검수] 칠한 결과 위에 칸 번호를 얹었습니다. 등장인물 대표 그림과 등록한 옷 차림에 견주어 색이 틀린 칸만 "
            f"apply_characters(job={folder}, items=[…], checked=true)로 다시 보내세요. 예: 손·얼굴이 옷 색, "
-           "한 사람의 옷 일부가 다른 사람 색, 재킷인데 셔츠 색. 고칠 칸이 없으면 apply_characters(job, items=[], checked=true)를 "
+           "한 사람의 옷 일부가 다른 사람 색, 재킷인데 셔츠 색(겉옷을 등록한 인물의 넓은 몸통·등판이 흰색이면 대개 틀린 것). "
+           "확신이 없어도 사용자에게 미루지 말고 등록한 옷과 같은 페이지의 다른 컷 차림을 따라 고르세요. 고칠 칸이 없으면 apply_characters(job, items=[], checked=true)를 "
            "부르거나 그대로 끝내세요. 한 번만 확인합니다."]
     for i, im in enumerate(check_maps(state, info["regions"], width=720), 1):
         path = folder / f"check_{i}.png"
