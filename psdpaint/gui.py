@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
 )
 
 import threading
-from dataclasses import replace
 
 from . import __version__, ai, characters, style, updater
 from .palette import read_palette
@@ -31,12 +30,11 @@ from .widgets import (MOD, ColorPicker, Combo, Dialog, RoundScroll, Tip, button,
                       Popup, clear_layout, hbox0, icon, label, search_box,
                       to_hex)
 from .cli import output_path
-from .core import (AwaitingAnswer, Options, PaintError, next_options, paint, quick_preview, region_at,
+from .core import (AwaitingAnswer, Options, PaintError, paint, quick_preview, region_at,
                    repaint, set_region)
 
 APP_NAME = "psd-paint"
 COL_FILE, COL_STATUS, COL_INFO = range(3)
-REF_ROLE = Qt.UserRole + 1  # 파일별 레퍼런스 경로 (없으면 설정 탭의 공통 참고 방식)
 DONE_ROLE = Qt.UserRole + 2  # 이번 목록에서 칠하기를 마친 파일
 LABEL_W = 96  # 설정 탭 라벨 고정폭
 PRESET_ROW = 26  # 프리셋 표 안의 색 칸·삭제 버튼 크기
@@ -106,21 +104,17 @@ class Worker(QObject):
         self.stop = False
 
     def run(self):
-        chained = self.opts
-        for row, src, dst, ref in self.jobs:
+        for row, src, dst in self.jobs:
             if self.stop:
                 break
             self.started_file.emit(row)
             t = time.time()
-            # 파일별 레퍼런스가 있으면 그것을, 없으면 공통 설정(또는 앞 파일 결과)을 쓴다
-            opts = replace(self.opts, hint_source="psd" if ref.lower().endswith(".psd") else "image",
-                           hint_path=ref) if ref else chained
+            opts = self.opts
             try:
                 Path(dst).parent.mkdir(parents=True, exist_ok=True)
                 result = paint(src, dst, opts,
                                progress=lambda msg, frac, row=row: self.progressed.emit(row, msg, frac))
                 self.finished_file.emit(row, result, time.time() - t)
-                chained = next_options(opts, result)  # 연속 모드: 이 결과를 다음 파일의 레퍼런스로
             except AwaitingAnswer as e:
                 self.waiting_file.emit(row, str(e))
             except PaintError as e:
@@ -935,24 +929,14 @@ class MainWindow(QMainWindow):
         self.src_layer = QRadioButton("파일 안 참고 레이어")
         self.src_layer.setToolTip("PSD 안의 '참고' 폴더(점·낙서 힌트) 또는 칠해 둔 '참고' 레이어를 봅니다.\n"
                                   "없으면 PSD 옆의 '파일이름_참고.png'를 찾고, 그것도 없으면 자동으로 칠합니다.")
-        self.src_image = QRadioButton("레퍼런스 이미지 (PNG·JPG) · AI")
-        self.src_psd = QRadioButton("레퍼런스 PSD (캐릭터 시트·채색 참고) · AI")
-        self.src_psd.setToolTip("밑색이 칠해진 PSD. 그 안의 '밑색'(또는 '참고') 폴더 레이어 이름과 색을 그대로 씁니다.")
         self.src_chars = QRadioButton("캐릭터 프리셋 · AI")
-        self.src_chars.setToolTip("이미지 모델이 부위·인물을 나누고, AI가 누구인지 알아본 뒤 색상 프리셋의\n"
-                                  "'캐릭터/부위' 색(예: 하늘/머리, 하늘/재킷)으로 칠합니다. Gemini API 키가 필요합니다.")
+        self.src_chars.setToolTip("AI가 영역마다 부위와 누구인지 알아본 뒤 색상 프리셋의\n"
+                                  "'캐릭터/부위' 색(예: 하늘/머리, 하늘/재킷)으로 칠합니다.")
         src_group = QButtonGroup(w)
-        for b in (self.src_layer, self.src_image, self.src_psd, self.src_chars):
+        for b in (self.src_layer, self.src_chars):
             src_group.addButton(b)
-        {"image": self.src_image, "psd": self.src_psd, "characters": self.src_chars}.get(
-            s.value("hint_source", "layer"), self.src_layer).setChecked(True)
-        self.hint_path = QLineEdit(s.value("hint_path", ""))
-        self.hint_path.setPlaceholderText("레퍼런스 파일")
-        self.hint_browse = QPushButton("찾기")
-        self.hint_browse.clicked.connect(self.pick_hint_path)
-        ref_note = label("다른 페이지·캐릭터 시트는 AI가 인물과 부위를 맞춰 칠합니다 (아래 AI 연결). "
-                         "같은 페이지를 칠한 레퍼런스면 AI 없이 바로 칠합니다.", "summary")
-        ref_note.setWordWrap(True)
+        # 예전 레퍼런스 이미지·PSD 방식은 앱에서 뺐다 (결과가 나쁘고 요청만 많았다) → 참고 레이어로 돌린다
+        (self.src_chars if s.value("hint_source", "layer") == "characters" else self.src_layer).setChecked(True)
         self.parts_method = Combo()
         for text, key in (("영역 확인 칸 — Claude 등 글 AI만으로", "tiles"),
                           ("Gemini 이미지 지도 — 더 정확, Gemini 키 필요", "image")):
@@ -964,9 +948,7 @@ class MainWindow(QMainWindow):
                                 "(머리·피부·재킷·조끼·셔츠·넥타이·바지 …)로 넣습니다.", "summary")
         self.looks_note.setWordWrap(True)
         section("참고 방식")
-        add("방식", vbox(self.src_layer, self.src_image, self.src_psd, self.src_chars), top=True)
-        add("레퍼런스", hbox(self.hint_path, self.hint_browse))
-        add("", ref_note)
+        add("방식", vbox(self.src_layer, self.src_chars), top=True)
         add("부위 나누기", self.parts_method)
         parts_label = grid.itemAtPosition(row - 1, 0).widget()
         self.tile_min = spin(100, 20000, s.value("tile_min_area", Options.tile_min_area, int), " px")
@@ -981,7 +963,7 @@ class MainWindow(QMainWindow):
         add("", self.looks_note)
         self.looks_row = (self.parts_method, parts_label, self.tile_min, tile_label, self.tile_auto_bg, self.looks_note)
         self.parts_method.currentIndexChanged.connect(self.update_image_model)
-        for b in (self.src_layer, self.src_image, self.src_psd, self.src_chars):
+        for b in (self.src_layer, self.src_chars):
             b.toggled.connect(self.update_ref_enabled)
         self.update_ref_enabled()
 
@@ -1093,18 +1075,9 @@ class MainWindow(QMainWindow):
         add("AI 매칭", self.ai_mode)
         ai_first = row  # 이 줄부터 AI 연결 세부 설정 (AI 매칭이 '끄기'면 가린다)
         cost_note = label("API로 바로 매칭하면 요청마다 선택한 제공자의 API 사용 요금이 청구될 수 있습니다. "
-                          "검수·인물 확대를 켜면 요청이 그만큼 늘어납니다.", "summary")
+                          "Claude 데스크톱(MCP)으로 쓰면 API 키 없이 구독으로 됩니다.", "summary")
         cost_note.setWordWrap(True)
         add("", cost_note)
-        self.ai_review = QCheckBox("칠한 결과를 한 번 더 보고 고치기 (요청 1회 추가)")
-        self.ai_review.setChecked(s.value("ai_review", False, bool))
-        add("검수", self.ai_review)
-        self.ai_zoom = QCheckBox("인물마다 크게 잘라 부위를 다시 검토 (요청 1회 추가)")
-        self.ai_zoom.setChecked(s.value("ai_zoom", True, bool))
-        add("인물 확대", self.ai_zoom)
-        self.ai_check = QCheckBox("영역을 하나씩 강조해 머리카락·피부·옷을 다시 확인 (요청 1회 추가)")
-        self.ai_check.setChecked(s.value("ai_check", True, bool))
-        add("영역 확인", self.ai_check)
         self.image_model = Combo()
         for m in characters.IMAGE_MODELS:
             self.image_model.addItem(m, m)
@@ -1156,7 +1129,6 @@ class MainWindow(QMainWindow):
         s.setValue("offset", self.offset.value())
         s.setValue("gap", self.gap.value())
         s.setValue("hint_source", self.hint_source())
-        s.setValue("hint_path", self.hint_path.text())
         s.setValue("parts_method", self.parts_method.currentData())
         s.setValue("tile_min_area", self.tile_min.value())
         s.setValue("tile_auto_bg", self.tile_auto_bg.isChecked())
@@ -1164,9 +1136,6 @@ class MainWindow(QMainWindow):
         pid = self.provider.currentData()
         s.setValue("provider", pid)
         s.setValue("ai_mode", self.ai_mode.currentData())
-        s.setValue("ai_review", self.ai_review.isChecked())
-        s.setValue("ai_zoom", self.ai_zoom.isChecked())
-        s.setValue("ai_check", self.ai_check.isChecked())
         s.setValue(f"model_{pid}", self.model.currentText())
         self.save_api_key()
 
@@ -1177,14 +1146,10 @@ class MainWindow(QMainWindow):
             line_group=self.line_group.text().strip() or "선화",
             hint_group=self.hint_group.text().strip() or "참고",
             hint_source=self.hint_source(),
-            hint_path=self.hint_path.text().strip(),
             ai_mode=self.ai_mode.currentData(),
             ai_provider=self.provider.currentData(),
             ai_model=self.model.currentText().strip() or ai.PROVIDERS[self.provider.currentData()]["model"],
             ai_key=self.api_key.text().strip(),
-            ai_review=self.ai_review.isChecked(),
-            ai_zoom=self.ai_zoom.isChecked(),
-            ai_check=self.ai_check.isChecked(),
             characters=characters.from_presets(self.presets.presets, profiles=self.characters_tab.profiles),
             ai_parts=self.parts_method.currentData(),
             tile_min_area=self.tile_min.value(),
@@ -1203,13 +1168,9 @@ class MainWindow(QMainWindow):
         )
 
     def hint_source(self):
-        return ("image" if self.src_image.isChecked() else "psd" if self.src_psd.isChecked()
-                else "characters" if self.src_chars.isChecked() else "layer")
+        return "characters" if self.src_chars.isChecked() else "layer"
 
     def update_ref_enabled(self):
-        on = self.src_image.isChecked() or self.src_psd.isChecked()
-        self.hint_path.setEnabled(on)
-        self.hint_browse.setEnabled(on)
         for widget in self.looks_row:
             widget.setVisible(self.src_chars.isChecked())
 
@@ -1234,12 +1195,6 @@ class MainWindow(QMainWindow):
         over = self.overwrite.isChecked()
         self.suffix.setEnabled(not over)
         self.overwrite_note.setVisible(over)
-
-    def pick_hint_path(self):
-        filt = "이미지 (*.png *.jpg *.jpeg *.webp)" if self.src_image.isChecked() else "Photoshop (*.psd)"
-        path, _ = QFileDialog.getOpenFileName(self, "레퍼런스 파일", self.hint_path.text(), filt)
-        if path:
-            self.hint_path.setText(path)
 
     # ---- AI 연결 ----
     def load_provider(self):
@@ -1344,35 +1299,15 @@ class MainWindow(QMainWindow):
         menu = Popup(self)
         menu.item(f"선택한 파일만 칠하기 ({len(rows)}개)", "run", not running)
         menu.line()
-        menu.item("레퍼런스 지정…", "set_ref")
-        menu.item("레퍼런스 지정 해제", "clear_ref", any(i.data(COL_FILE, REF_ROLE) for i in items))
-        menu.line()
         menu.item("결과 파일 열기", "open", len(rows) == 1 and rows[0] in self.results)
         menu.item("목록에서 제거", "remove", not running)
         chosen = menu.pick(self.files.viewport().mapToGlobal(pos))
         if chosen == "run":
             self.start(rows)
-        elif chosen == "set_ref":
-            path, _ = QFileDialog.getOpenFileName(self, "이 파일의 레퍼런스", self.settings.value("last_dir", ""),
-                                                  "레퍼런스 (*.png *.jpg *.jpeg *.webp *.psd)")
-            if path:
-                for i in items:
-                    self.set_item_ref(i, path)
-        elif chosen == "clear_ref":
-            for i in items:
-                self.set_item_ref(i, None)
         elif chosen == "open":
             open_path(self.results[rows[0]].out_path, app=self.app_for_open())
         elif chosen == "remove":
             self.remove_selected()
-
-    @staticmethod
-    def set_item_ref(item, path):
-        """파일별 레퍼런스를 지정하고 파일 이름 옆에 표시한다."""
-        item.setData(COL_FILE, REF_ROLE, path)
-        name = Path(item.data(COL_FILE, Qt.UserRole)).name
-        item.setText(COL_FILE, f"{name}   ↳ {Path(path).name}" if path else name)
-        item.setToolTip(COL_FILE, item.data(COL_FILE, Qt.UserRole) + (f"\n레퍼런스: {path}" if path else ""))
 
     def remove_selected(self):
         for item in self.files.selectedItems():
@@ -1421,7 +1356,7 @@ class MainWindow(QMainWindow):
             item = self.files.topLevelItem(row)
             src = item.data(COL_FILE, Qt.UserRole)
             dst = Path(src) if self.overwrite.isChecked() else output_path(src, out_dir, self.suffix.text())
-            jobs.append((row, src, dst, item.data(COL_FILE, REF_ROLE)))
+            jobs.append((row, src, dst))
             self.set_status(item, "대기", style.MUTED)
             item.setData(COL_STATUS, DONE_ROLE, False)
             item.setText(COL_INFO, "")

@@ -19,7 +19,7 @@ from .core import AwaitingAnswer, Options, PaintError, paint
 server = MCPServer(
     name="psd-paint",
     instructions=(
-        "선화 PSD에 밑색 레이어를 자동으로 깔아 주는 도구다. "
+        "선화 PSD에 밑색 레이어를 자동으로 깔아 주는 도구다. 인물을 칠할 때는 paint_psd(characters=true)를 쓴다. "
         "paint_psd로 칠한다. 레퍼런스가 다른 페이지면 paint_psd가 레퍼런스(P번호 팔레트)와 원고 번호 지도 이미지를 돌려준다. "
         "그때는 이미지를 보고 먼저 인물마다 자세와 인체 구조를 따라 부위(머리카락·피부·겉옷 …)별 번호를 나눈 뒤, "
         "레퍼런스에서 같은 인물의 부위별 팔레트를 골라 apply_match(people=…)를 호출한다. "
