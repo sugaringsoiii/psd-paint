@@ -227,13 +227,12 @@ def read_hints(psd, opts, psd_path=None, boundary=None):
             raise PaintError("레퍼런스 PSD를 지정하세요.")
         ref = open_psd(opts.hint_path, "레퍼런스 PSD")
         group = psdio.find(ref, opts.output_group, True) or psdio.find(ref, opts.hint_group, True)
-        line = psdio.find(ref, opts.line_group, True)
+        ref_lines = line_groups(ref, opts)
         same_size = (ref.width, ref.height) == (psd.width, psd.height)
-        lines_ok = line is not None  # 선화가 없는 PSD(캐릭터 시트 등)는 다른 페이지로 본다
-        if same_size and line is not None and boundary is not None:
-            la = psdio.group_alpha(line, ref)
-            lines = np.zeros(la.shape + (4,), np.uint8)
-            lines[..., 3] = np.where(la > 80, 255, 0)
+        lines_ok = bool(ref_lines)  # 선화가 없는 PSD(캐릭터 시트 등)는 다른 페이지로 본다
+        if same_size and ref_lines and boundary is not None:
+            lines = np.zeros((ref.height, ref.width, 4), np.uint8)
+            lines[..., 3] = np.where(lines_alpha(ref_lines, ref, opts), 255, 0)
             try:
                 check_lines(lines, boundary, "레퍼런스 PSD")
             except LineMismatch:
@@ -246,8 +245,7 @@ def read_hints(psd, opts, psd_path=None, boundary=None):
             _folder_hints(group, ref, key_map, keys)
         else:
             # 밑색 폴더가 없으면 선화를 끈 합성 이미지를 칠한 예시로 쓴다
-            line = psdio.find(ref, opts.line_group, True)
-            with psdio.hidden([line] if line is not None else []):
+            with psdio.hidden(ref_lines):
                 rgba = np.asarray(ref.composite(force=True).convert("RGBA")).copy()
             keys = _image_hints(rgba, opts, key_map)
             image_mode = True
@@ -278,14 +276,29 @@ def read_hints(psd, opts, psd_path=None, boundary=None):
     return key_map, keys, names_top_down, image_mode
 
 
+def line_groups(psd, opts):
+    """선화 폴더들. 같은 이름 폴더가 여러 개면 빈 폴더는 빼고 모두 쓴다. → [폴더], 첫째가 밑색을 넣을 기준 폴더"""
+    groups = psdio.find_all(psd, opts.line_group, True)
+    filled = [g for g in groups if psdio.has_pixels(g)]
+    return filled or groups[:1]
+
+
+def lines_alpha(groups, psd, opts):
+    """선화 폴더들을 합친 선 마스크. 선화 폴더 안의 배경 선은 뺀다 (배경이 잘게 쪼개지지 않게)."""
+    line = np.zeros((psd.height, psd.width), bool)
+    for g in groups:
+        with psdio.hidden(psdio.matching(g, opts.background)):
+            line |= psdio.group_alpha(g, psd) > 80
+    return line
+
+
 def segment(psd, opts):
     """선화와 컷 테두리로 닫힌 영역을 나눈다. → (선화 폴더, 경계, 컷 테두리, 영역 번호 맵, 영역 수)"""
-    line_group = psdio.find(psd, opts.line_group, True)
-    if line_group is None:
+    groups = line_groups(psd, opts)
+    if not groups:
         raise PaintError(f"'{opts.line_group}' 선화 폴더가 없습니다.")
-    # 선화 폴더 안의 배경 선은 경계에서 뺀다 (배경이 잘게 쪼개지지 않게)
-    with psdio.hidden(psdio.matching(line_group, opts.background)):
-        line = psdio.group_alpha(line_group, psd) > 80
+    line_group = groups[0]
+    line = lines_alpha(groups, psd, opts)
     frame = np.zeros_like(line)
     for layer in psdio.find_pixel_layers(psd, opts.extra_boundary):
         # 숨긴 레이어, 배경, 캔버스 절반 이상을 덮는 레이어(컷 배경 등)는 경계가 아니다
@@ -718,7 +731,7 @@ def repaint(state, progress=None):
     opts = state["opts"]
     say("PSD 여는 중", 0.1)
     psd = PSDImage.open(state["psd_path"])
-    line_group = psdio.find(psd, opts.line_group, True)
+    line_group = line_groups(psd, opts)[0]
     keys, names = list(state["keys"]), list(state["names"])
     say("밑색 채우는 중", 0.4)
     cls = fill(state["labels"], state["boundary"], state["region_key"].copy(), keys, opts)

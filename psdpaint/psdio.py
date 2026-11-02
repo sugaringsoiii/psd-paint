@@ -19,6 +19,17 @@ def find(group, name, want_group=None):
     return None
 
 
+def find_all(group, name, want_group=None):
+    """이름이 같은 레이어를 하위 폴더까지 전부 찾는다."""
+    return [layer for layer in group.descendants()
+            if layer.name == name and (want_group is None or layer.is_group() == want_group)]
+
+
+def has_pixels(group):
+    """폴더 안에 픽셀이 있는 레이어가 하나라도 있나."""
+    return any(not layer.is_group() and layer.width > 0 and layer.height > 0 for layer in group.descendants())
+
+
 def find_pixel_layers(group, patterns):
     """이름이 패턴(* 와일드카드)에 맞는 픽셀 레이어 전부. 폴더는 제외한다."""
     out = []
