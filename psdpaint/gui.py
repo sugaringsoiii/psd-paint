@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 import threading
 from dataclasses import replace
 
-from . import __version__, ai, style
+from . import __version__, ai, style, updater
 from .palette import read_palette
 from .widgets import (MOD, ColorPicker, Combo, Dialog, RoundScroll, Tip, button, card, color_field,
                       Popup, clear_layout, hbox0, icon, label, search_box,
@@ -497,6 +497,9 @@ class MainWindow(QMainWindow):
     ai_test_done = Signal(bool, str)
     repaint_done = Signal(int, object, str)
     models_loaded = Signal(list, str)
+    update_found = Signal(str, str)  # 새 버전, 설치 파일 주소
+    update_progress = Signal(float)
+    update_done = Signal(str, str)  # 실패면 (받은 파일 또는 "", 이유), 성공이면 ("", "")
 
     def __init__(self):
         super().__init__()
@@ -530,6 +533,11 @@ class MainWindow(QMainWindow):
         outer.addWidget(self.split, 1)
         self.setCentralWidget(root)
         self.update_summary()
+        self.update_found.connect(self.on_update_found)
+        self.update_progress.connect(self.on_update_progress)
+        self.update_done.connect(self.on_update_done)
+        if updater.installed():  # 소스로 실행할 때는 확인하지 않는다
+            QTimer.singleShot(1500, self.check_update)
 
         # 미리보기 이동: 키보드(+ - 0), 트랙패드 핀치, 스페이스를 누른 채 드래그
         for keys, act in ((("+", "="), lambda: self.set_zoom(self.zoom * 1.25)),
@@ -553,6 +561,13 @@ class MainWindow(QMainWindow):
         names.setSpacing(8)
         names.addWidget(title)
         names.addWidget(sub)
+        # 새 버전이 있으면 부제 옆에 [vX.Y.Z 업데이트] 를 띄운다
+        self.update_btn = button("", icon_name="download")
+        self.update_btn.setObjectName("updatePill")
+        self.update_btn.setIcon(icon("download", style.ACCENT, style.ACCENT, gap=2))  # 받는 중에도 보라
+        self.update_btn.hide()
+        self.update_btn.clicked.connect(self.run_update)
+        names.addWidget(self.update_btn)
 
         self.stop_btn = button("중지", icon_name="pause")
         self.stop_btn.setEnabled(False)
@@ -1614,6 +1629,61 @@ class MainWindow(QMainWindow):
         result = self.results.get(self.files.indexOfTopLevelItem(item)) if item else None
         if result:
             open_path(result.out_path, reveal=reveal, app=self.app_for_open())
+
+    # ---- 앱 안 업데이트 ----
+    def check_update(self):
+        def run():
+            found = updater.check()
+            if found:
+                self.update_found.emit(*found)
+        threading.Thread(target=run, daemon=True).start()
+
+    def on_update_found(self, version, url):
+        self.update_info = (version, url)
+        self.update_btn.setText(f"v{version} 업데이트")
+        self.update_btn.setToolTip("새 버전을 받아 바꾼 뒤 앱을 다시 켭니다.")
+        self.update_btn.show()
+
+    def run_update(self):
+        version, url = self.update_info
+        if self.worker is not None:
+            Dialog(self, "칠하는 중에는 업데이트할 수 없어요.", "끝나거나 중지한 뒤 다시 눌러 주세요.", cancel=False).exec()
+            return
+        if not Dialog(self, f"v{version}로 업데이트할까요?",
+                      "새 버전을 받아 지금 앱과 바꾼 뒤 다시 켭니다. 1~2분 걸릴 수 있어요.").exec():
+            return
+        self.update_btn.setEnabled(False)
+        self.update_btn.setText("받는 중…")
+
+        def run():
+            try:
+                updater.update(url, self.update_progress.emit)
+                self.update_done.emit("", "")
+            except updater.InstallFailed as e:
+                self.update_done.emit(str(e.path), str(e))
+            except Exception as e:  # 받기 실패 (인터넷 끊김 등)
+                self.update_done.emit("", str(e) or type(e).__name__)
+        threading.Thread(target=run, daemon=True).start()
+
+    def on_update_progress(self, frac):
+        self.update_btn.setText(f"받는 중 {int(frac * 100)}%")
+
+    def on_update_done(self, path, err):
+        if not err:  # 새 앱이 곧 다시 켜진다
+            self.close()
+            QApplication.quit()
+            return
+        version, _ = self.update_info
+        self.log.appendPlainText(f"업데이트 실패: {err}")  # 원인은 로그에만 남긴다
+        self.update_btn.setEnabled(True)
+        self.update_btn.setText(f"v{version} 업데이트")
+        if path:  # 받기는 했다: 손으로 설치하게 연다
+            Dialog(self, "자동으로 바꾸지 못했어요.",
+                   "받은 설치 파일을 열게요. 지금 앱을 끄고 새 앱을 응용 프로그램 폴더로 옮겨 주세요.",
+                   cancel=False).exec()
+            open_path(path)
+        else:
+            Dialog(self, "업데이트를 받지 못했어요.", "인터넷 연결을 확인한 뒤 다시 눌러 주세요.", cancel=False).exec()
 
     def closeEvent(self, e):
         self.save_settings()

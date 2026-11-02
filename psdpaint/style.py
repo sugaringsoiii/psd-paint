@@ -74,6 +74,18 @@ QPushButton#primary {{
 }}
 QPushButton#primary:hover {{ background: {ACCENT_HI}; border-color: {ACCENT_HI}; }}
 QPushButton#primary:disabled {{ background: {ACCENT_OFF}; border-color: {ACCENT_OFF}; color: white; }}
+QPushButton#updatePill {{  /* 헤더의 [vX.Y.Z 업데이트] */
+    background: {ACCENT_SOFT};
+    border: none;
+    color: {ACCENT};
+    font-size: 12px;
+    font-weight: 500;
+    padding: 2px 8px;
+    min-height: 18px;
+    border-radius: 11px;
+}}
+QPushButton#updatePill:hover {{ background: {SELECT}; }}
+QPushButton#updatePill:disabled {{ background: {ACCENT_SOFT}; color: {ACCENT}; }}
 QPushButton#ghost {{ background: transparent; border: none; color: {MUTED}; padding: 4px 8px; min-height: 18px; font-weight: 400; }}  /* 높이 26 */
 QPushButton#ghost:hover {{ color: {TEXT}; background: {HOVER}; }}
 
