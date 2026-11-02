@@ -304,6 +304,23 @@ def lines_alpha(groups, psd, opts):
     return line
 
 
+def line_art(groups, psd, opts):
+    """선화 폴더들을 흰 바탕에 합친 그림(RGB)과 그 불투명 마스크. AI에게 보여 줄 칸·검수 그림에 쓴다.
+
+    선 마스크(boundary)만 그리면 속을 흰색으로 칠한 소품(컵 등)이 까만 덩어리로 보여 AI가 알아보지 못한다.
+    """
+    out = np.full((psd.height, psd.width, 3), 255.0)
+    opaque = np.zeros((psd.height, psd.width), bool)
+    for g in groups:
+        with psdio.hidden(psdio.matching(g, opts.background)):
+            a = np.asarray(g.composite(viewport=psd.viewbox, force=True).convert("RGBA")).astype(float)
+        out = out * (1 - a[..., 3:] / 255) + a[..., :3] * (a[..., 3:] / 255)
+        opaque |= a[..., 3] > 80
+    out = out.astype(np.uint8)
+    out[~opaque] = 255
+    return out, opaque
+
+
 def thin(mask, rounds=8):
     """선 마스크를 1px 뼈대로 깎는다 (Zhang-Suen). 선은 몇 번이면 다 깎이므로 rounds에서 멈춘다
     (검게 칠한 넓은 면까지 다 깎으려면 수십 번 돌아야 해서 느리다)."""
@@ -423,6 +440,8 @@ def segment(psd, opts):
         raise PaintError(f"'{opts.line_group}' 선화 폴더가 없습니다.")
     line_group = groups[0]
     line = lines_alpha(groups, psd, opts)
+    # 캐릭터 방식에서 AI에게 보여 줄 실제 선화 그림 (다음 단계가 segment.art로 꺼내 쓴다)
+    segment.art = line_art(groups, psd, opts) if opts.hint_source == "characters" else None  # (그림, 선화가 덮은 곳)
     frame = np.zeros_like(line)
     for layer in psdio.find_pixel_layers(psd, opts.extra_boundary):
         # 숨긴 레이어, 배경, 캔버스 절반 이상을 덮는 레이어(컷 배경 등)는 경계가 아니다
@@ -836,7 +855,7 @@ def _tiles_match(labels, n, boundary, frame, cand, chars, opts, folder, say, psd
     auto_bg = characters.panel_backgrounds(labels, frame) if opts.tile_auto_bg else set()
     regions = characters.tile_regions(labels, [r for r in cand if r not in auto_bg])
     say(f"영역 확인 칸 만드는 중 ({len(regions)}곳)", 0.4)
-    sheets = characters.region_sheets(labels, boundary, regions)
+    sheets = characters.region_sheets(labels, boundary, regions, art=getattr(segment, "art", None))
     job, profiles = characters.tiles_job(sheets, chars, len(regions), psd_path)
     answer, usage = _ask_or_wait(job, lambda: characters.save_tiles(job, profiles, regions, folder), opts, folder,
                                  say, "영역 확인")
@@ -977,7 +996,8 @@ def paint(psd_path, out_path, opts=None, progress=None):
     if not (region_key >= 0).any():
         raise PaintError("칠할 영역이 없습니다 (참고 힌트도 자동 칠하기도 없음).")
     state = {"psd_path": str(psd_path), "out_path": str(out_path), "opts": opts, "labels": labels,
-             "boundary": boundary, "region_key": region_key.copy(), "keys": list(keys), "names": list(names)}
+             "boundary": boundary, "region_key": region_key.copy(), "keys": list(keys), "names": list(names),
+             "art": getattr(segment, "art", None) if opts.hint_source == "characters" else None}
     say("밑색 채우는 중", 0.6)
     cls = fill(labels, boundary, region_key, keys, opts)
     merged = cap_layers(cls, keys, names, opts)

@@ -613,22 +613,36 @@ def tile_regions(labels, cand):
     return sorted((int(r) for r in cand if boxes[r - 1] is not None), key=key)
 
 
-def region_sheets(labels, boundary, regions):
+def _drawn(art, boundary, sl, line):
+    """칸·검수 그림의 바탕: 실제 선화(있으면)에 컷 테두리를 더한 그림. 선화가 없으면 선 마스크를 검게."""
+    if art is None:
+        rgb = np.full(boundary[sl].shape + (3,), 255, np.uint8)
+        rgb[boundary[sl]] = 0
+        return rgb
+    img, opaque = art
+    rgb = img[sl].copy()
+    rgb[boundary[sl] & ~opaque[sl]] = 0  # 선화 밖 경계(컷 테두리)
+    return rgb
+
+
+def region_sheets(labels, boundary, regions, art=None):
     """영역마다 둘레를 넉넉히 잘라 그 영역만 빨갛게 칠한 칸을 만들고 판으로 모은다. → [판 이미지]"""
     h, w = labels.shape
     boxes = ndimage.find_objects(labels)
     from PIL import ImageDraw
     font = match._font(22)
     tiles = []
+    line = None
     for n, r in enumerate(regions, 1):
         sl = boxes[r - 1]
         cy, cx = (sl[0].start + sl[0].stop) // 2, (sl[1].start + sl[1].stop) // 2
         # 영역보다 넉넉히 잘라 얼굴·몸이 보이게 한다 (작은 영역도 최소 280px 둘레)
         half = max(int(max(sl[0].stop - sl[0].start, sl[1].stop - sl[1].start) * 0.8), 140)
         y0, y1, x0, x1 = max(0, cy - half), min(h, cy + half), max(0, cx - half), min(w, cx + half)
-        rgb = np.full((y1 - y0, x1 - x0, 3), 255, np.uint8)
-        rgb[labels[y0:y1, x0:x1] == r] = (255, 120, 120)
-        rgb[boundary[y0:y1, x0:x1]] = 0
+        sl2 = (slice(y0, y1), slice(x0, x1))
+        rgb = _drawn(art, boundary, sl2, line)
+        m = labels[sl2] == r
+        rgb[m] = (rgb[m] * 0.25 + np.array((255, 90, 90)) * 0.75).astype(np.uint8)  # 영역 안 선은 비쳐 보이게
         im = Image.fromarray(rgb)
         im.thumbnail((TILE, TILE), Image.LANCZOS)
         cell = Image.new("RGB", (TILE, TILE + 30), "white")
@@ -859,7 +873,13 @@ def check_maps(state, regions, width=900):
     labels, region_key, keys = state["labels"], state["region_key"], state["keys"]
     lut = np.array([(255, 255, 255)] + [rgb for _, rgb in keys], np.uint8)
     rgb = lut[(region_key + 1)[labels]]
-    rgb[state["boundary"]] = 0
+    art = state.get("art")
+    if art is None:
+        rgb[state["boundary"]] = 0
+    else:  # 실제 선화를 그대로 얹는다 (흰 속을 칠한 소품도 제 모양으로 보인다)
+        img, opaque = art
+        rgb[opaque] = img[opaque]
+        rgb[state["boundary"] & ~opaque] = 0
     img = Image.fromarray(rgb)
     draw = ImageDraw.Draw(img)
     font = match._font(34)
