@@ -239,6 +239,15 @@ def image_maps(labels, boundary, content, api_key, model, folder, say=lambda msg
         m = person_px == j
         if (body & m).sum() < max(800, 0.4 * m.sum()):
             person_px[m] = -1
+    # 실루엣 안인데 부위 지도 두 장이 모두 배경이라고 한 곳(머리카락 끝 가닥 사이 틈 등)은 가장 가까운 몸 부위로 채운다.
+    # 두 장이 엇갈린 곳(모름)은 그대로 두어 영역 다수결에 맡긴다.
+    # 사람 지도가 선 밖으로 살짝 번진 곳까지 칠하지 않게 실루엣은 2px 줄여서 쓴다
+    body = np.isin(part_px, [PART_NAMES.index(p) for p in BODY])
+    inside = ndimage.binary_erosion(person_px >= 0, iterations=2)
+    fix = inside & (part_px == PART_NAMES.index("배경"))
+    if fix.any() and body.any():
+        iy, ix = ndimage.distance_transform_edt(~body, return_indices=True)[1]
+        part_px[fix] = part_px[iy[fix], ix[fix]]
     return part_px, person_px, person_ids, chunks, usage
 
 
@@ -264,7 +273,9 @@ def split_mixed(labels, part_px, cand, min_px=300, share=0.15):
         if tot < 2 * min_px:
             continue
         top, second = np.argsort(-c)[:2]
-        if c[second] < max(min_px, share * tot):
+        # 배경이 대부분인 영역(컷 배경이 가닥 사이 틈으로 들어온 곳)은 몸 조각이 작아도 떼어 낸다
+        need = min_px if PART_NAMES[top] == "배경" else max(min_px, share * tot)
+        if c[second] < need:
             continue
         sl = boxes[r - 1]
         m = labels[sl] == r
@@ -274,7 +285,7 @@ def split_mixed(labels, part_px, cand, min_px=300, share=0.15):
         idx = ndimage.distance_transform_edt(~known, return_indices=True)[1]
         full = lab[idx[0], idx[1]]
         for v in np.unique(full[m]):
-            if v == top:
+            if v == top or c[v] < need:
                 continue
             comp, k = ndimage.label(m & (full == v))
             for j in range(1, k + 1):
@@ -401,6 +412,9 @@ def assign(part_of, person_of, who, chars, n, labels, background):
     → region_key (영역 수+1), keys [(레이어, rgb)], 레이어 이름 순서
     """
     color_of = {c["name"]: c["colors"] for c in chars}
+    # 엑스트라·모르는 인물의 피부는 등록한 캐릭터들이 가장 많이 쓴 피부색 (없으면 흰색)
+    skins = [tuple(c["colors"]["피부"]) for c in chars if c["colors"].get("피부")]
+    default_skin = max(set(skins), key=skins.count) if skins else (255, 255, 255)
     region_key = np.full(n + 1, -1, np.int64)
     keys = []
     extras = sorted({p for p in person_of.values() if who.get(p, "모름") not in color_of})
@@ -412,7 +426,7 @@ def assign(part_of, person_of, who, chars, n, labels, background):
             rgb = color_of.get(who.get(pid, "모름"), {}).get(part)
             if rgb is None:
                 if part == "피부":
-                    rgb = (255, 255, 255)
+                    rgb = default_skin
                 else:
                     # 프리셋에 없는 인물·부위: 부위별 회색, 옆 사람과 섞이지 않게 사람마다 밝기를 조금 바꾼다
                     j = extras.index(pid) if pid in extras else 0
