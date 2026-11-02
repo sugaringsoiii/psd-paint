@@ -84,9 +84,13 @@ def _tile_sheet(folder, got):
     return out
 
 
-def _preview_images(result, width=720, max_h=1400):
+def _preview_images(result, width=720):
     """칠한 결과 미리보기. PSD 옆에 PNG로 저장하고(어느 앱에서든 열어 볼 수 있게),
-    대화에는 컷이 잘 보이게 세로로 나눠 넣는다 (긴 웹툰 페이지를 한 장으로 줄이면 알아보기 어렵다)."""
+    대화에는 컷 단위로 잘라 넣는다 (컷 사이 흰 여백에서 자르므로 작은 컷은 작게, 큰 컷은 잘리지 않게)."""
+    import numpy as np
+
+    from .characters import page_chunks
+
     im = result.preview.convert("RGB")
     path = Path(result.out_path).with_name(Path(result.out_path).stem + "_미리보기.png")
     try:
@@ -95,15 +99,15 @@ def _preview_images(result, width=720, max_h=1400):
                 "사용자에게 이 미리보기 그림을 보여 주세요 (PSD를 열지 않아도 결과를 볼 수 있게).")
     except OSError:
         note = ""
-    if im.width > width:
-        im = im.resize((width, round(im.height * width / im.width)))
+    content = np.asarray(im.convert("L")) < 248
     parts = []
-    for y in range(0, im.height, max_h):
-        piece = im.crop((0, y, im.width, min(im.height, y + max_h)))
-        if piece.convert("L").getextrema()[0] < 250:  # 빈 여백 조각은 넣지 않는다
-            buf = io.BytesIO()
-            piece.save(buf, "PNG", optimize=True)
-            parts.append(Image(data=buf.getvalue(), format="png"))
+    for y0, y1, x0, x1 in page_chunks(content, gap=12):
+        piece = im.crop((x0, y0, x1, y1))
+        if piece.width > width:
+            piece = piece.resize((width, round(piece.height * width / piece.width)))
+        buf = io.BytesIO()
+        piece.save(buf, "PNG", optimize=True)
+        parts.append(Image(data=buf.getvalue(), format="png"))
     return ([note] if note else []) + parts
 
 

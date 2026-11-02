@@ -700,10 +700,16 @@ def write(psd, line_group, cls, keys, names_top_down, opts, out_path):
 PREVIEW_WIDTH = 1200  # 앱에서 확대해도 흐려지지 않을 만큼
 
 
-def make_preview(cls, boundary, keys, width=PREVIEW_WIDTH):
+def make_preview(cls, boundary, keys, width=PREVIEW_WIDTH, art=None):
+    """밑색 위에 선을 얹은 미리보기. art(실제 선화)가 있으면 그것을 얹어 속을 칠한 소품도 제 모양으로 보인다."""
     lut = np.array([(255, 255, 255)] + [rgb for _, rgb in keys], np.uint8)
     rgb = lut[cls]
-    rgb[boundary] = 0
+    if art is None:
+        rgb[boundary] = 0
+    else:
+        img, opaque = art
+        rgb[opaque] = img[opaque]
+        rgb[boundary & ~opaque] = 0
     im = Image.fromarray(rgb)
     return im.resize((width, max(1, round(im.height * width / im.width))), Image.LANCZOS)
 
@@ -1003,7 +1009,7 @@ def paint(psd_path, out_path, opts=None, progress=None):
     merged = cap_layers(cls, keys, names, opts)
     say("PSD 저장 중", 0.85)
     layers = write(psd, line_group, cls, keys, names, opts, out_path)
-    preview = make_preview(cls, boundary, keys)
+    preview = make_preview(cls, boundary, keys, art=state.get("art"))
     say("완료", 1.0)
     return Result(Path(out_path), layers, n, hinted, unhinted_large, auto, merged, preview, ai_usage, state)
 
@@ -1071,7 +1077,7 @@ def repaint(state, progress=None):
     merged = cap_layers(cls, keys, names, opts)
     say("PSD 저장 중", 0.8)
     layers = write(psd, line_group, cls, keys, names, opts, state["out_path"])
-    preview = make_preview(cls, state["boundary"], keys)
+    preview = make_preview(cls, state["boundary"], keys, art=state.get("art"))
     say("완료", 1.0)
     n = int(state["labels"].max())
     return Result(Path(state["out_path"]), layers, n, 0, 0, 0, merged, preview, {}, state)
