@@ -35,6 +35,8 @@ class Options:
     ai_parts: str = "image"             # 캐릭터 방식의 부위 나누기: image(Gemini 이미지 지도) · tiles(글 AI가 영역 확인 칸에 답)
     tile_min_area: int = 1000           # 영역 확인 칸에 넣을 최소 넓이(px). 더 작은 영역은 묻지 않고 둘레를 따른다 (토큰 절약)
     tile_auto_bg: bool = True           # 컷마다 둘레를 다 두른 가장 넓은 영역(컷 배경)은 묻지 않고 배경으로 둔다
+    leak_gap_px: int = 16               # 큰 영역만 이만큼 틈을 더 닫아 다시 나눈다 (옆얼굴 선이 열려 얼굴과 배경이 한 영역일 때). 0이면 끔
+    leak_min_area: int = 20000          # 이보다 넓은 영역만 다시 나눈다
     extra_boundary: list = field(default_factory=lambda: ["컷*", "*테두리*"])  # 경계로 쓸 픽셀 레이어 이름 패턴
     output_group: str = "밑색"
     gap_close_px: int = 2       # 선을 이만큼 두껍게 해서 작은 틈을 막는다
@@ -300,6 +302,39 @@ def lines_alpha(groups, psd, opts):
     return line
 
 
+def close_frames(frame, band=8, cover=0.6, min_side=150):
+    """컷 테두리의 끊긴 곳을 잇는다. 머리카락이 테두리 밖으로 나가며 테두리를 지운 자리로
+    컷 안의 영역(얼굴 등)이 페이지 여백과 한 영역으로 이어지는 것을 막는다.
+
+    테두리 덩어리마다 네 변 중 대부분(cover 이상)이 테두리인 곧은 변만 끝까지 이어 그린다 (사선 컷은 건드리지 않는다).
+    """
+    lab, k = ndimage.label(frame)
+    out = frame.copy()
+    for i, sl in enumerate(ndimage.find_objects(lab), 1):
+        if sl is None:
+            continue
+        y0, y1, x0, x1 = sl[0].start, sl[0].stop, sl[1].start, sl[1].stop
+        if y1 - y0 < min_side or x1 - x0 < min_side:
+            continue
+        m = lab[sl] == i
+        edges = {"top": m[:band].any(0), "bottom": m[-band:].any(0), "left": m[:, :band].any(1), "right": m[:, -band:].any(1)}
+        width = max(2, int(np.median([
+            m[:band].sum(0)[edges["top"]].mean() if edges["top"].any() else 2,
+            m[:, :band].sum(1)[edges["left"]].mean() if edges["left"].any() else 2])))
+        for side, hit in edges.items():
+            if hit.mean() < cover:
+                continue
+            if side == "top":
+                out[y0:y0 + width, x0:x1] = True
+            elif side == "bottom":
+                out[y1 - width:y1, x0:x1] = True
+            elif side == "left":
+                out[y0:y1, x0:x0 + width] = True
+            else:
+                out[y0:y1, x1 - width:x1] = True
+    return out
+
+
 def segment(psd, opts):
     """선화와 컷 테두리로 닫힌 영역을 나눈다. → (선화 폴더, 경계, 컷 테두리, 영역 번호 맵, 영역 수)"""
     groups = line_groups(psd, opts)
@@ -315,6 +350,7 @@ def segment(psd, opts):
         a = psdio.canvas_rgba(layer, psd)[..., 3] > 80
         if a.mean() < 0.5:
             frame |= a
+    frame = close_frames(frame)
     boundary = line | frame
     closed = cv2.dilate(boundary.astype(np.uint8), _disk(1), iterations=opts.gap_close_px) > 0
     labels, n = ndimage.label(~closed)
@@ -652,10 +688,46 @@ def _ask_or_wait(job, save, opts, folder, say, msg):
     return answer, dict(job.usage)
 
 
+def split_leaks(labels, boundary, opts):
+    """선이 크게 열려 한 영역으로 이어진 큰 덩어리(옆얼굴과 컷 배경 등)를 틈을 더 닫아 다시 나눈다.
+
+    전체를 크게 닫으면 눈·가는 머리카락 같은 작은 영역이 선에 묻히므로, leak_min_area보다 넓은 영역만 나눈다.
+    labels를 고친다. → 새 영역 수
+    """
+    n = int(labels.max())
+    if opts.leak_gap_px <= 0:
+        return n
+    heavy, _ = ndimage.label(~(cv2.dilate(boundary.astype(np.uint8), _disk(1), iterations=opts.leak_gap_px) > 0))
+    areas = np.bincount(labels.ravel(), minlength=n + 1)
+    boxes = ndimage.find_objects(labels)
+    for r in np.nonzero(areas >= opts.leak_min_area)[0]:
+        if r == 0 or boxes[r - 1] is None:
+            continue
+        sl = boxes[r - 1]
+        m = labels[sl] == r
+        h = np.where(m, heavy[sl], 0)
+        ids, cnt = np.unique(h[h > 0], return_counts=True)
+        keep = ids[cnt >= opts.tile_min_area]
+        if len(keep) < 2:
+            continue
+        # 크게 닫느라 선이 된 픽셀은 가장 가까운 덩어리를 따른다
+        seed = np.isin(h, keep)
+        iy, ix = ndimage.distance_transform_edt(~seed, return_indices=True)[1]
+        full = np.where(m, h[iy, ix], 0)
+        biggest = keep[np.argmax(cnt[np.isin(ids, keep)])]
+        for k in keep:
+            if k != biggest:
+                n += 1
+                labels[sl][full == k] = n
+    return n
+
+
 def _tiles_match(labels, n, boundary, frame, cand, chars, opts, folder, say):
     """영역 확인 칸: 글 AI가 영역마다 부위·누구인지 답한다 (그림 모델 없이)."""
     from . import characters
 
+    n0, n = n, split_leaks(labels, boundary, opts)
+    cand = np.r_[cand, np.arange(n0 + 1, n + 1)]  # 나눠서 새로 생긴 영역
     areas = np.bincount(labels.ravel(), minlength=n + 1)
     cand = cand[areas[cand] >= opts.tile_min_area]
     auto_bg = characters.panel_backgrounds(labels, frame) if opts.tile_auto_bg else set()
@@ -667,7 +739,7 @@ def _tiles_match(labels, n, boundary, frame, cand, chars, opts, folder, say):
                                  say, "영역 확인")
     part_of, person_of, who, background = characters.from_tiles(answer, regions, n)
     background[list(auto_bg)] = True
-    return part_of, person_of, who, background, usage
+    return part_of, person_of, who, background, usage, n
 
 
 def _image_match(labels, boundary, frame, cand, bg, chars, opts, folder, say):
@@ -721,8 +793,8 @@ def character_match(labels, n, boundary, frame, opts, out_path, say):
         raise PaintError("영역 확인 칸 방식은 AI가 답해야 합니다. 설정의 AI 매칭을 켜세요 (MCP는 자동).")
     try:
         if opts.ai_parts == "tiles":
-            part_of, person_of, who, background, usage = _tiles_match(labels, n, boundary, frame, cand, chars,
-                                                                       opts, folder, say)
+            part_of, person_of, who, background, usage, n = _tiles_match(labels, n, boundary, frame, cand, chars,
+                                                                          opts, folder, say)
         else:
             part_of, person_of, who, background, usage, n = _image_match(labels, boundary, frame, cand, bg, chars,
                                                                            opts, folder, say)

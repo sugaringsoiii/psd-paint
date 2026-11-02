@@ -1091,6 +1091,7 @@ class MainWindow(QMainWindow):
             combo.setMinimumContentsLength(8)
             combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         add("AI 매칭", self.ai_mode)
+        ai_first = row  # 이 줄부터 AI 연결 세부 설정 (AI 매칭이 '끄기'면 가린다)
         cost_note = label("API로 바로 매칭하면 요청마다 선택한 제공자의 API 사용 요금이 청구될 수 있습니다. "
                           "검수·인물 확대를 켜면 요청이 그만큼 늘어납니다.", "summary")
         cost_note.setWordWrap(True)
@@ -1116,6 +1117,10 @@ class MainWindow(QMainWindow):
         add("모델", hbox(self.model, self.list_btn))
         add("API 키", hbox(self.api_key, self.test_btn))
         add("", self.ai_status)
+        self.ai_rows = [item.widget() or item.layout() for r in range(ai_first, row) for c in (0, 1)
+                        if (item := grid.itemAtPosition(r, c)) is not None]
+        self.ai_mode.currentIndexChanged.connect(self.update_ai_rows)
+        self.update_ai_rows()
         self.ai_test_done.connect(self.on_ai_test)
         self.models_loaded.connect(self.on_models_loaded)
         self.load_provider()
@@ -1207,6 +1212,17 @@ class MainWindow(QMainWindow):
         self.hint_browse.setEnabled(on)
         for widget in self.looks_row:
             widget.setVisible(self.src_chars.isChecked())
+
+    def update_ai_rows(self):
+        """AI 매칭이 '끄기'면 AI 연결 세부 설정을 가린다."""
+        on = self.ai_mode.currentData() != "off"
+        for it in self.ai_rows:
+            if isinstance(it, QWidget):
+                it.setVisible(on)
+            else:  # 버튼이 붙은 줄(hbox)은 안의 위젯을 가린다
+                for i in range(it.count()):
+                    if (w := it.itemAt(i).widget()) is not None:
+                        w.setVisible(on)
 
     def update_image_model(self):
         tiles = self.parts_method.currentData() == "tiles"

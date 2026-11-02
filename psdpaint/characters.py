@@ -42,6 +42,19 @@ PART_ALIASES = {
     "장신구·소품": ["소품", "장신구", "귀걸이", "안경", "장신구·소품"],
 }
 PART_OF_WORD = {w: part for part, words in PART_ALIASES.items() for w in words}
+# 캐릭터 프리셋에 그 부위 색이 없을 때 대신 쓸 부위 (예: 셔츠만 입은 캐릭터의 '겉옷'으로 보인 곳은 셔츠 색)
+OUTFIT_FALLBACK = {"겉옷": ["상의", "셔츠"], "상의": ["셔츠", "겉옷"], "셔츠": ["상의", "겉옷"],
+                   "하의": ["치마"], "치마": ["하의"], "양말": ["신발"]}
+
+
+def outfit_text(c):
+    """캐릭터의 등록한 옷 부위 글 (AI에게 알려 준다)."""
+    worn = [p for p in PART_ALIASES if p in c.get("colors", {}) and p not in ("머리카락", "피부")]
+    return ", ".join(worn) if worn else "(등록한 옷 없음)"
+
+
+def looks_text(chars):
+    return "\n".join(f"- {c['name']}: {c['look'] or '(설명 없음)'} / 등록한 옷: {outfit_text(c)}" for c in chars)
 
 PART_CODES = {"머리카락": (255, 0, 0), "피부": (255, 255, 0), "머리띠·모자": (255, 0, 255), "겉옷": (0, 0, 255),
               "상의": (0, 255, 255), "셔츠": (0, 255, 0), "넥타이·리본": (128, 0, 255), "하의": (139, 69, 19),
@@ -437,7 +450,7 @@ def identify_job(crops, chars):
     """누구인지 묻는 요청 (API·요청 폴더·MCP 공통)."""
     ids = [pid for pid, _ in crops]
     names = [c["name"] for c in chars]
-    looks = "\n".join(f"- {c['name']}: {c['look'] or '(설명 없음)'}" for c in chars)
+    looks = looks_text(chars)
     person = match._obj({"person": {"type": "string", "enum": ids},
                          "character": {"type": "string", "enum": names + ["모름"]},
                          "reason": {"type": "string"}})
@@ -479,7 +492,11 @@ def assign(part_of, person_of, who, chars, n, labels, background):
             key = ("사물", (215, 215, 215))
         else:
             pid = person_of.get(r)
-            rgb = color_of.get(who.get(pid, "모름"), {}).get(part)
+            colors = color_of.get(who.get(pid, "모름"), {})
+            if colors and part not in colors:
+                # 등록하지 않은 옷 부위면 가까운 등록 부위를 쓴다 (셔츠만 입은 캐릭터의 겉옷 → 셔츠)
+                part = next((alt for alt in OUTFIT_FALLBACK.get(part, []) if alt in colors), part)
+            rgb = colors.get(part)
             if rgb is None:
                 if part == "피부":
                     rgb = default_skin
@@ -516,6 +533,7 @@ TILE_PROMPT = """웹툰 밑색 작업이다.
 - 실루엣 밖, 컷 안의 빈 바탕과 하늘·벽·바닥은 배경이다. 말풍선·효과선 안도 배경이다.
 - 손에 든 물건은 사물, 그 손은 피부다.
 - 같은 사람이 여러 칸에 나오면 같은 이름을 쓴다. 머리띠·머리 모양·귀걸이로 누구인지 알아본다.
+- 옷은 그 등장인물의 '등록한 옷' 안에서 고른다. 예를 들어 셔츠만 등록한 인물은 겉옷처럼 보여도 셔츠다.
 등장인물:
 {looks}
 칸 번호 1 ~ {count}를 모두 적는다."""
@@ -580,7 +598,7 @@ def profile_images(chars):
 def tiles_job(sheets, chars, count):
     profiles = profile_images(chars)
     names = [c["name"] for c in chars]
-    looks = "\n".join(f"- {c['name']}: {c['look'] or '(설명 없음)'}" for c in chars)
+    looks = looks_text(chars)
     item = match._obj({"tile": {"type": "integer"}, "part": {"type": "string", "enum": TILE_PARTS},
                        "character": {"type": "string", "enum": names + ["모름", "없음"]}})
     schema = match._obj({"items": {"type": "array", "items": item}})
