@@ -37,6 +37,7 @@ from .core import (AwaitingAnswer, Options, PaintError, next_options, paint, qui
 APP_NAME = "psd-paint"
 COL_FILE, COL_STATUS, COL_INFO = range(3)
 REF_ROLE = Qt.UserRole + 1  # 파일별 레퍼런스 경로 (없으면 설정 탭의 공통 참고 방식)
+DONE_ROLE = Qt.UserRole + 2  # 이번 목록에서 칠하기를 마친 파일
 LABEL_W = 96  # 설정 탭 라벨 고정폭
 PRESET_ROW = 26  # 프리셋 표 안의 색 칸·삭제 버튼 크기
 CHECK_W = 16  # 프리셋 표 체크박스 칸: 상자 14 + 테두리가 잘리지 않을 여유 2
@@ -573,7 +574,7 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self.request_stop)
         self.run_btn = button("밑색 칠하기", "primary", "play")
-        self.run_btn.setToolTip(f"목록의 PSD를 차례로 칠하기\t{MOD} ↩")
+        self.run_btn.setToolTip(f"아직 칠하지 않은 PSD를 차례로 칠하기\t{MOD} ↩")
         self.run_btn.setShortcut("Ctrl+Return")
         self.run_btn.clicked.connect(lambda: self.start())
 
@@ -1196,11 +1197,19 @@ class MainWindow(QMainWindow):
 
     # ---- 실행 ----
     def start(self, rows=None):
-        """rows가 있으면 그 행만, 없으면 목록 전체를 칠한다."""
+        """rows가 있으면 그 행만 (완료한 파일도 다시), 없으면 목록에서 아직 완료하지 않은 파일만 칠한다."""
         n = self.files.topLevelItemCount()
-        rows = list(range(n)) if rows is None else sorted(rows)
-        if not n or not rows:
+        skipped = 0
+        if rows is None:
+            rows = [r for r in range(n) if not self.files.topLevelItem(r).data(COL_STATUS, DONE_ROLE)]
+            skipped = n - len(rows)
+        rows = sorted(rows)
+        if not n:
             Dialog(self, "PSD 파일을 먼저 추가하세요.", cancel=False).exec()
+            return
+        if not rows:
+            Dialog(self, "목록의 파일을 모두 칠했어요.",
+                   "다시 칠하려면 파일을 우클릭해 '선택한 파일만 칠하기'를 고르세요.", cancel=False).exec()
             return
         if self.other_dir.isChecked() and not self.out_dir.text().strip():
             Dialog(self, "결과 폴더를 지정하세요.", "설정 탭의 결과 폴더에서 고를 수 있습니다.", cancel=False).exec()
@@ -1214,6 +1223,7 @@ class MainWindow(QMainWindow):
             dst = Path(src) if self.overwrite.isChecked() else output_path(src, out_dir, self.suffix.text())
             jobs.append((row, src, dst, item.data(COL_FILE, REF_ROLE)))
             self.set_status(item, "대기", style.MUTED)
+            item.setData(COL_STATUS, DONE_ROLE, False)
             item.setText(COL_INFO, "")
             self.results.pop(row, None)
             self.edits.pop(row, None)
@@ -1224,7 +1234,7 @@ class MainWindow(QMainWindow):
         self.total_bar.setRange(0, len(jobs) * 100)
         self.total_bar.setValue(0)
         self.set_running(True)
-        self.log.appendPlainText(f"── {len(jobs)}개 파일 시작")
+        self.log.appendPlainText(f"── {len(jobs)}개 파일 시작" + (f" (완료한 {skipped}개는 건너뜀)" if skipped else ""))
 
         self.thread = QThread()
         # macOS 기본 스레드 스택(512KB)으로는 psd-tools·scipy 처리 중 스택이 넘친다
@@ -1268,6 +1278,7 @@ class MainWindow(QMainWindow):
         item = self.files.topLevelItem(row)
         self.results[row] = result
         self.set_status(item, "완료", style.TEXT, "done")
+        item.setData(COL_STATUS, DONE_ROLE, True)
         note = f"레이어 {len(result.layers)}개"
         item.setText(COL_INFO, note)
         item.setForeground(COL_INFO, QColor(style.MUTED))
