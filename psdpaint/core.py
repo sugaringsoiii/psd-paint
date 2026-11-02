@@ -203,11 +203,18 @@ def read_hints(psd, opts, psd_path=None, boundary=None):
     key_map = np.full((psd.height, psd.width), -1, np.int32)
     keys = []
     image_mode = False
+    source = opts.hint_source
+    if source in ("image", "psd") and opts.hint_path:
+        # 방식과 파일 종류가 어긋나면(레퍼런스 PSD를 골랐는데 PNG 등) 파일 확장자를 따른다
+        source = "psd" if Path(opts.hint_path).suffix.lower() in (".psd", ".psb") else "image"
 
-    if opts.hint_source == "image":
+    if source == "image":
         if not opts.hint_path or not Path(opts.hint_path).exists():
             raise PaintError("레퍼런스 이미지를 지정하세요.")
-        im = Image.open(opts.hint_path).convert("RGBA")
+        try:
+            im = Image.open(opts.hint_path).convert("RGBA")
+        except Exception as e:
+            raise PaintError(f"레퍼런스 이미지를 읽지 못했습니다: {Path(opts.hint_path).name} ({e})") from None
         if im.size != (psd.width, psd.height) and abs(im.width / im.height - psd.width / psd.height) > 0.01:
             raise LineMismatch("레퍼런스 이미지 크기가 원고와 달라 다른 페이지로 보입니다", _flatten(np.asarray(im)))
         rgba = load_sidecar(opts.hint_path, psd)
@@ -215,10 +222,10 @@ def read_hints(psd, opts, psd_path=None, boundary=None):
             check_lines(rgba, boundary, "레퍼런스 이미지")
         keys = _image_hints(rgba, opts, key_map)
         image_mode = True
-    elif opts.hint_source == "psd":
+    elif source == "psd":
         if not opts.hint_path or not Path(opts.hint_path).exists():
             raise PaintError("레퍼런스 PSD를 지정하세요.")
-        ref = PSDImage.open(opts.hint_path)
+        ref = open_psd(opts.hint_path, "레퍼런스 PSD")
         group = psdio.find(ref, opts.output_group, True) or psdio.find(ref, opts.hint_group, True)
         line = psdio.find(ref, opts.line_group, True)
         same_size = (ref.width, ref.height) == (psd.width, psd.height)
@@ -468,6 +475,15 @@ def fill(labels, boundary, region_key, keys, opts):
     return cls
 
 
+def open_psd(path, what="PSD"):
+    """PSD를 연다. PSD가 아니거나 깨진 파일이면 알아보기 쉬운 PaintError로 바꾼다."""
+    try:
+        return PSDImage.open(path)
+    except Exception as e:
+        raise PaintError(f"{what}를 읽지 못했습니다: {Path(path).name}. "
+                         f"Photoshop·클립스튜디오에서 PSD로 다시 저장해 보세요. ({e})") from None
+
+
 def backup_path(psd_path):
     p = Path(psd_path)
     return p.with_name(f"{p.stem}_백업{p.suffix}")
@@ -601,7 +617,7 @@ def paint(psd_path, out_path, opts=None, progress=None):
     if Path(out_path).resolve() == Path(psd_path).resolve() and not backup_path(psd_path).exists():
         # 원본에 덮어쓰기: 처음 한 번만 원본을 '이름_백업.psd'로 남긴다
         shutil.copy2(psd_path, backup_path(psd_path))
-    psd = PSDImage.open(psd_path)
+    psd = open_psd(psd_path)
     say("선화 영역 나누는 중", 0.15)
     line_group, boundary, frame, labels, n = segment(psd, opts)
     say("참고 레이어 읽는 중", 0.3)
