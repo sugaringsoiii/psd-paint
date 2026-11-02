@@ -110,8 +110,13 @@ def search_box(placeholder):
     edit = QLineEdit()
     edit.setObjectName("search")
     edit.setPlaceholderText(placeholder)
-    edit.setClearButtonEnabled(True)
     edit.addAction(icon("search", style.FAINT, gap=0), QLineEdit.LeadingPosition)
+    # 지우기 버튼: Qt 기본(진한 회색) 대신 흐린 아이콘. 글자가 있을 때만 보인다
+    clear = edit.addAction(icon("clear", style.FAINT, gap=0), QLineEdit.TrailingPosition)
+    clear.setToolTip("지우기")
+    clear.setVisible(False)
+    clear.triggered.connect(edit.clear)
+    edit.textChanged.connect(lambda t: clear.setVisible(bool(t)))
     return edit
 
 
@@ -480,7 +485,7 @@ class ColorButton(QPushButton):
         super().paintEvent(e)  # 테두리·hover 는 스타일시트
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(QColor(style.BORDER_HI))
+        p.setPen(QColor(style.BORDER))  # 흰색에 가까운 색도 보이게 옅은 테두리
         p.setBrush(QColor(*self.rgb))
         box = QRectF(0, 0, 16, 16)
         box.moveCenter(QRectF(self.rect()).center())

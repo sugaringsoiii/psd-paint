@@ -105,7 +105,7 @@ QCheckBox, QRadioButton {{ background: transparent; padding: 2px 0; }}
 QCheckBox {{ spacing: 6px; }}
 QRadioButton {{ spacing: 4px; }}
 QCheckBox::indicator {{
-    width: 16px; height: 16px;
+    width: 14px; height: 14px;
     border: 1px solid {CONTROL};
     border-radius: 4px;
     background: {PANEL};
@@ -117,6 +117,11 @@ QCheckBox::indicator:checked {{
     image: url({ASSETS}/check.svg);
 }}
 QCheckBox::indicator:checked:hover {{ background: {ACCENT_HI}; border-color: {ACCENT_HI}; }}
+QCheckBox::indicator:indeterminate {{
+    background: {ACCENT};
+    border-color: {ACCENT};
+    image: url({ASSETS}/dash.svg);
+}}
 QRadioButton::indicator {{ width: 16px; height: 16px; image: url({ASSETS}/radio-off.svg); }}
 QRadioButton::indicator:checked {{ image: url({ASSETS}/radio.svg); }}
 QCheckBox:disabled, QRadioButton:disabled {{ color: {FAINT}; }}
@@ -186,6 +191,8 @@ QScrollBar::handle:horizontal {{ background: {SCROLL}; border-radius: 3px; min-w
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 QPushButton#swatch {{ padding: 0; min-height: 0; }}  /* 색 칸 (gui.ColorButton) */
+QPushButton#cellSwatch {{ padding: 0; min-height: 0; border: none; background: transparent; }}  /* 표 안 색 칸 */
+QPushButton#cellSwatch:hover {{ background: {HOVER}; }}
 QWidget#tableHead {{ border-top: 1px solid {BORDER}; border-bottom: 1px solid {BORDER}; }}  /* 파일 목록 표 머리와 같게 */
 QWidget#tableRow {{ border-bottom: 1px solid {BORDER}; }}
 QWidget#tableRow:hover {{ background: {RAISED}; }}

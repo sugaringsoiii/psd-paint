@@ -39,6 +39,7 @@ COL_FILE, COL_STATUS, COL_INFO = range(3)
 REF_ROLE = Qt.UserRole + 1  # 파일별 레퍼런스 경로 (없으면 설정 탭의 공통 참고 방식)
 LABEL_W = 96  # 설정 탭 라벨 고정폭
 PRESET_ROW = 26  # 프리셋 표 안의 색 칸·삭제 버튼 크기
+CHECK_W = 16  # 프리셋 표 체크박스 칸: 상자 14 + 테두리가 잘리지 않을 여유 2
 STATUS_ICON = {"done": style.OK, "fail": style.FAIL, "waiting": style.MUTED, "paused": style.MUTED}  # 상태 아이콘 색
 
 
@@ -302,6 +303,9 @@ class PresetsTab(QWidget):
                             if isinstance(p["name"], str)]  # 예전 [추가] 버그로 생긴 name=false 줄은 버린다
         except (ValueError, KeyError, TypeError):  # 망가진 값이면 빈 목록으로 시작
             self.presets = []
+        self.selected = set()  # 체크한 프리셋 (dict 의 id)
+        self.bulk_btn = button("", "ghost", "delete")
+        self.bulk_btn.clicked.connect(self.remove_selected)
         add_btn = button("추가", "ghost", "plus")
         add_btn.clicked.connect(lambda: self.add())  # clicked 의 checked 값이 name 으로 들어가지 않게
         import_btn = button("가져오기", "ghost", "download")
@@ -310,7 +314,7 @@ class PresetsTab(QWidget):
         top = QHBoxLayout()
         top.addWidget(label("색상 프리셋", "section"))
         top.addStretch()
-        top.addLayout(hbox0(import_btn, add_btn))
+        top.addLayout(hbox0(self.bulk_btn, import_btn, add_btn))
         note = label("저장한 색은 미리보기에서 영역을 누르면 맨 위에 나옵니다. "
                      "머리·피부·눈처럼 자주 쓰는 색을 넣어 두세요.", "summary")
         note.setWordWrap(True)
@@ -320,6 +324,10 @@ class PresetsTab(QWidget):
         hh = QHBoxLayout(head)
         hh.setContentsMargins(4, 6, 4, 6)
         hh.setSpacing(8)
+        self.all_check = QCheckBox()  # 보이는 줄 모두 고르기·풀기
+        self.all_check.setFixedWidth(CHECK_W)
+        self.all_check.clicked.connect(self.toggle_all)
+        hh.addWidget(self.all_check)
         for text, w, indent in (("색", PRESET_ROW, 5), ("이름", 0, 7), ("값", 96, 7), ("", PRESET_ROW, 0)):
             lb = label(text, "section")
             lb.setContentsMargins(indent, 0, 0, 0)
@@ -334,7 +342,8 @@ class PresetsTab(QWidget):
         iv.setContentsMargins(0, 0, 0, 8)
         iv.setSpacing(12)
         iv.addLayout(self.box)
-        iv.addWidget(self.empty)
+        iv.addStretch()  # 결과가 없으면 안내 글자가 남은 자리 가운데에 온다
+        iv.addWidget(self.empty, 0, Qt.AlignCenter)
         iv.addStretch()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -366,7 +375,12 @@ class PresetsTab(QWidget):
             h = QHBoxLayout(row)
             h.setContentsMargins(4, 0, 4, 0)
             h.setSpacing(8)
+            check = QCheckBox()
+            check.setFixedWidth(CHECK_W)
+            check.setChecked(id(p) in self.selected)
+            check.toggled.connect(lambda on, p=p: self.select(p, on))
             colors, btn, hex_edit = color_field(p["rgb"], PRESET_ROW)
+            btn.setObjectName("cellSwatch")  # 표 안에서는 테두리 없이 색만
             name = QLineEdit(p["name"])
             name.setPlaceholderText("이름 (예: 주인공 머리)")
             for e in (name, hex_edit):
@@ -376,6 +390,7 @@ class PresetsTab(QWidget):
             delete.setIcon(icon("delete", style.MUTED, gap=0))  # 글자 없는 버튼이라 아이콘만 가운데
             delete.setStyleSheet("padding: 0;")
             delete.setToolTip("삭제")
+            h.addWidget(check)
             h.addWidget(btn)
             h.addWidget(name, 1)
             h.addWidget(hex_edit)
@@ -384,7 +399,7 @@ class PresetsTab(QWidget):
             name.editingFinished.connect(lambda p=p, e=name: (p.__setitem__("name", e.text().strip()),
                                                               self.save()))
             delete.clicked.connect(lambda _=False, p=p: self.remove(p))
-            row.preset = p
+            row.preset, row.check = p, check
             self.box.addWidget(row)
         self.filter()
 
@@ -401,6 +416,40 @@ class PresetsTab(QWidget):
         self.empty.setText("검색 결과가 없어요." if self.presets else
                                   "아직 프리셋이 없어요. [추가]를 눌러 첫 색을 만들어 보세요.")
         self.empty.setVisible(not shown)
+        self.update_bulk()
+
+    def visible_rows(self):
+        return [w for w in (self.box.itemAt(i).widget() for i in range(self.box.count())) if not w.isHidden()]
+
+    def select(self, p, on):
+        (self.selected.add if on else self.selected.discard)(id(p))
+        self.update_bulk()
+
+    def toggle_all(self):
+        """보이는 줄이 다 골라져 있으면 모두 풀고, 아니면 모두 고른다."""
+        rows = self.visible_rows()
+        on = not all(w.check.isChecked() for w in rows)
+        for w in rows:
+            w.check.setChecked(on)
+
+    def update_bulk(self):
+        """[선택 삭제 n개] 버튼과 머리 체크박스(전부·일부·없음)를 고른 상태에 맞춘다."""
+        n = len(self.selected)
+        self.bulk_btn.setText(f"선택 삭제 {n}개")
+        self.bulk_btn.setVisible(n > 0)
+        rows = self.visible_rows()
+        picked = sum(w.check.isChecked() for w in rows)
+        self.all_check.setCheckState(Qt.Checked if rows and picked == len(rows) else
+                                     Qt.PartiallyChecked if picked else Qt.Unchecked)
+
+    def remove_selected(self):
+        n = len(self.selected)
+        if not n or not Dialog(self, f"프리셋 {n}개를 삭제할까요?", "삭제한 프리셋은 되돌릴 수 없어요.").exec():
+            return
+        self.presets = [p for p in self.presets if id(p) not in self.selected]
+        self.selected.clear()
+        self.save()
+        self.render()
 
     def save(self):
         self.settings.setValue("presets", json.dumps(self.presets, ensure_ascii=False))
@@ -436,6 +485,7 @@ class PresetsTab(QWidget):
 
     def remove(self, p):
         self.presets.remove(p)
+        self.selected.discard(id(p))
         self.save()
         self.render()
 
