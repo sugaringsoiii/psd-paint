@@ -387,16 +387,19 @@ def decide(labels, n, part_px, person_px, person_ids, bg_hint):
     return part_of, person_of, background
 
 
-def spread(labels, region_key, todo, passes=6):
-    """정하지 못한 영역은 둘레에 가장 많이 닿은 칠한 영역을 따른다 (실루엣 안 빈틈 메우기)."""
+def spread(labels, region_key, todo, passes=6, reach=14):
+    """정하지 못한 영역은 둘레에 가장 많이 닿은 칠한 영역을 따른다 (실루엣 안 빈틈 메우기).
+
+    reach: 둘레를 볼 거리(px). 선이 두꺼우면 이웃 영역이 선 너머에 있으므로 선 두께보다 넉넉히 본다.
+    """
     boxes = ndimage.find_objects(labels)
     todo = [r for r in todo if boxes[r - 1] is not None]
     for _ in range(passes):
         left = []
         for r in todo:
-            sl = tuple(slice(max(s.start - 6, 0), s.stop + 6) for s in boxes[r - 1])
+            sl = tuple(slice(max(s.start - reach, 0), s.stop + reach) for s in boxes[r - 1])
             mine = labels[sl] == r
-            ring = ndimage.binary_dilation(mine, iterations=6) & ~mine
+            ring = ndimage.binary_dilation(mine, iterations=reach) & ~mine
             neigh = labels[sl][ring]
             neigh = neigh[(neigh > 0) & (region_key[neigh] >= 0)]
             if neigh.size:
