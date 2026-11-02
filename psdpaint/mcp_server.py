@@ -76,7 +76,7 @@ def _tile_sheet(folder, got):
         prompt = prompt.replace(f"칸 번호 1 ~ {count}를 모두 적는다.", f"이번 판의 칸 번호 {first} ~ {last}를 모두 적는다.")
     out = [f"영역 확인 판 {todo}/{info['sheets']} (칸 {first}~{last}, 전체 {count}칸 중 {len(got)}칸 답함). 작업: {folder}\n"
            f"이 판의 칸 {first}~{last}만 보고 칸마다 부위·누구인지 적어 apply_characters(job=위 경로, items=[…])를 호출하세요. "
-           "다음 판은 답하면 이어서 드립니다. 칸을 하나씩 둘레의 얼굴·머리띠·옷깃까지 확인하고, 같은 사람은 판이 바뀌어도 같은 이름으로 적으세요.\n"]
+           "다음 판은 답하면 이어서 드립니다. 칸을 하나씩 둘레의 얼굴·머리 모양·액세서리·옷깃까지 확인하고, 같은 사람은 판이 바뀌어도 같은 이름으로 적으세요.\n"]
     for i, name in enumerate(info["profiles"], 1):
         # 첫 판엔 대표 그림을 크게, 다음 판부턴 작게 다시 보여 준다 (같은 사람을 같은 이름으로 답하게)
         out += [f"[등장인물 {name}]", _for_ai(folder / f"profile_{i}.png", None if not got else 260)]

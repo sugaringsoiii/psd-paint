@@ -119,7 +119,7 @@ def prompt_for(files):
     """칠할 파일 목록을 넣은 요청 글."""
     lines = "\n".join(f"- {f}" for f in files)
     return ("psd-paint로 아래 PSD를 캐릭터 프리셋으로 밑색 칠해 줘. 파일마다 psd-paint의 paint_characters(psd_path=…)를 부르면 "
-            "영역 확인 판이 한 장씩 와. 판마다 칸을 하나씩 둘레의 얼굴·머리띠·옷깃까지 보고 부위·누구인지 apply_characters로 답하고, "
+            "영역 확인 판이 한 장씩 와. 판마다 칸을 하나씩 둘레의 얼굴·머리 모양·액세서리·옷깃까지 보고 부위·누구인지 apply_characters로 답하고, "
             "다음 판이 오면 끝까지 이어서 답해 줘. 서두르지 말고 칸마다 꼼꼼히 봐 줘. 손은 꼭 피부로 적어 줘. "
             "다 칠하면 돌려준 미리보기 그림(_미리보기.png)을 보여 줘.\n" + lines)
 
