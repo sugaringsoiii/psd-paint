@@ -1,4 +1,4 @@
-"""색상 견본 파일 읽기: 포토샵 .aco, Adobe Swatch Exchange .ase, 클립스튜디오 컬러 세트 .cls → [(이름, (r, g, b))]."""
+"""색상 견본 파일 읽기(포토샵 .aco·Adobe Swatch Exchange .ase·클립스튜디오 컬러 세트 .cls)와 쓰기(.aco·.ase)."""
 import colorsys
 import struct
 from pathlib import Path
@@ -146,3 +146,28 @@ if __name__ == "__main__":  # 자체 점검: 만든 바이트를 다시 읽어 �
         (Path(d) / "c.cls").write_bytes(cls)
         assert read_palette(Path(d) / "c.cls") == [("초록", (0, 128, 0)), ("c 2", (91, 91, 91))]
     print("ok")
+
+
+# ---- 내보내기 ----
+def write_aco(path, colors):
+    """포토샵 색상 견본 .aco (1판 + 이름 있는 2판). colors: [(이름, (r, g, b))]"""
+    def block(version):
+        out = struct.pack(">HH", version, len(colors))
+        for name, (r, g, b) in colors:
+            out += struct.pack(">HHHHH", 0, r * 257, g * 257, b * 257, 0)
+            if version == 2:
+                text = name.encode("utf-16-be") + b"\0\0"
+                out += struct.pack(">I", len(text) // 2) + text
+        return out
+    Path(path).write_bytes(block(1) + block(2))
+
+
+def write_ase(path, colors):
+    """Adobe Swatch Exchange .ase (RGB 전역 색). colors: [(이름, (r, g, b))]"""
+    out = b"ASEF" + struct.pack(">HHI", 1, 0, len(colors))
+    for name, rgb in colors:
+        text = name.encode("utf-16-be") + b"\0\0"
+        body = struct.pack(">H", len(text) // 2) + text + b"RGB " + struct.pack(">fff", *(c / 255 for c in rgb))
+        body += struct.pack(">H", 2)  # 2 = 일반 색
+        out += struct.pack(">HI", 1, len(body)) + body
+    Path(path).write_bytes(out)

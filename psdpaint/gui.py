@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 import threading
 
 from . import __version__, ai, characters, clients, style, updater
-from .palette import read_palette
+from .palette import read_palette, write_aco, write_ase
 from .widgets import (MOD, ColorPicker, Combo, Dialog, RoundScroll, Tip, button, card, color_field,
                       Popup, clear_layout, hbox0, icon, label, search_box,
                       to_hex)
@@ -307,12 +307,17 @@ class PresetsTab(QWidget):
         add_btn = button("추가", "ghost", "plus")
         add_btn.clicked.connect(lambda: self.add())  # clicked 의 checked 값이 name 으로 들어가지 않게
         import_btn = button("가져오기", "ghost", "download")
-        import_btn.setToolTip("포토샵 색상 견본(.aco·.ase)이나 클립스튜디오 컬러 세트(.cls)의 색을 한 번에 추가합니다.")
+        import_btn.setToolTip("포토샵 색상 견본(.aco·.ase), 클립스튜디오 컬러 세트(.cls),\n"
+                              "psd-paint 프리셋 파일(.psdpaint)의 색을 한 번에 추가합니다.")
         import_btn.clicked.connect(self.import_palette)
+        export_btn = button("내보내기", "ghost", "upload")
+        export_btn.setToolTip("체크한 프리셋(없으면 전부)을 파일로 저장합니다.")
+        export_btn.clicked.connect(self.export_palette)
+        self.characters_tab = None  # MainWindow가 넣는다 (프리셋 파일에 캐릭터도 함께 담는다)
         top = QHBoxLayout()
         top.addWidget(label("색상 프리셋", "section"))
         top.addStretch()
-        top.addLayout(hbox0(self.bulk_btn, import_btn, add_btn))
+        top.addLayout(hbox0(self.bulk_btn, import_btn, export_btn, add_btn))
         note = label("저장한 색은 미리보기에서 영역을 누르면 맨 위에 나옵니다. "
                      "머리·피부·눈처럼 자주 쓰는 색을 넣어 두세요.", "summary")
         note.setWordWrap(True)
@@ -462,11 +467,43 @@ class PresetsTab(QWidget):
             edit = self.box.itemAt(self.box.count() - 1).widget().findChild(QLineEdit)
             QTimer.singleShot(0, edit.setFocus)
 
-    def import_palette(self):
-        path, _ = QFileDialog.getOpenFileName(self, "색상 견본 가져오기", self.settings.value("last_dir", ""),
-                                              "색상 견본 (*.aco *.ase *.cls)")
+    def export_palette(self):
+        chosen = [p for p in self.presets if id(p) in self.selected] or self.presets
+        if not chosen:
+            Dialog(self, "내보낼 프리셋이 없어요.", cancel=False).exec()
+            return
+        path, filt = QFileDialog.getSaveFileName(
+            self, "프리셋 내보내기", str(Path(self.settings.value("last_dir", "")) / "psd-paint 프리셋.psdpaint"),
+            "psd-paint 프리셋 — 캐릭터 포함 (*.psdpaint);;포토샵 색상 견본 (*.aco);;Adobe Swatch Exchange (*.ase)")
         if not path:
             return
+        ext = {"psdpaint": ".psdpaint", "aco": ".aco", "ase": ".ase"}
+        kind = next((k for k in ext if path.lower().endswith(ext[k])), next(k for k in ext if k in filt))
+        if not path.lower().endswith(ext[kind]):
+            path += ext[kind]
+        colors = [(p["name"], tuple(p["rgb"])) for p in chosen]
+        try:
+            if kind == "psdpaint":
+                profiles = self.characters_tab.profiles if self.characters_tab else []
+                characters.export_bundle(path, chosen, profiles)
+            elif kind == "aco":
+                write_aco(path, colors)
+            else:
+                write_ase(path, colors)
+        except OSError as e:
+            Dialog(self, "내보내지 못했습니다.", str(e), cancel=False).exec()
+            return
+        extra = f"캐릭터 {len(self.characters_tab.profiles)}명도 함께 담았어요." \
+            if kind == "psdpaint" and self.characters_tab and self.characters_tab.profiles else ""
+        Dialog(self, f"색 {len(chosen)}개를 내보냈어요.", extra, cancel=False).exec()
+
+    def import_palette(self):
+        path, _ = QFileDialog.getOpenFileName(self, "색상 견본 가져오기", self.settings.value("last_dir", ""),
+                                              "색상 견본 (*.aco *.ase *.cls *.psdpaint)")
+        if not path:
+            return
+        if path.lower().endswith(characters.BUNDLE_SUFFIX):
+            return self.import_bundle(path)
         try:
             colors = read_palette(path)
         except (ValueError, OSError) as e:
@@ -479,6 +516,24 @@ class PresetsTab(QWidget):
         self.render()
         skipped = len(colors) - len(new)
         Dialog(self, f"색 {len(new)}개를 가져왔어요.", f"이미 있는 {skipped}개는 건너뛰었어요." if skipped else "",
+               cancel=False).exec()
+
+    def import_bundle(self, path):
+        try:
+            presets, profiles = characters.import_bundle(path)
+        except (ValueError, OSError, KeyError) as e:
+            Dialog(self, "가져오지 못했습니다.", str(e) or "파일을 읽을 수 없습니다.", cancel=False).exec()
+            return
+        names = {p["name"] for p in self.presets}
+        new = [p for p in presets if p["name"] not in names]  # 같은 이름은 지금 것을 둔다
+        self.presets += new
+        self.save()
+        self.render()
+        added = 0
+        if self.characters_tab is not None:
+            added = self.characters_tab.merge(profiles)
+        Dialog(self, f"색 {len(new)}개, 캐릭터 {added}명을 가져왔어요.",
+               "이름이 같은 색·캐릭터는 지금 것을 그대로 뒀어요." if len(new) < len(presets) or added < len(profiles) else "",
                cancel=False).exec()
 
     def remove(self, p):
@@ -600,6 +655,15 @@ class CharactersTab(QWidget):
             p["image"] = path
             self.save()
             self.render()
+
+    def merge(self, profiles):
+        """가져온 프로필을 더한다. 이름이 같으면 지금 것을 둔다. → 더한 수"""
+        names = {p["name"] for p in self.profiles}
+        new = [p for p in profiles if p["name"] not in names]
+        self.profiles += new
+        self.save()
+        self.render()
+        return len(new)
 
     def remove(self, p):
         self.profiles.remove(p)
@@ -820,6 +884,7 @@ class MainWindow(QMainWindow):
         self.presets = PresetsTab(self.settings)
         tabs.addTab(self.presets, "")
         self.characters_tab = CharactersTab(self.settings)
+        self.presets.characters_tab = self.characters_tab
         tabs.addTab(self.characters_tab, "")
         # 탭 이름은 직접 그린다. Qt 탭은 아이콘과 글자 사이가 11px 가까이 벌어져 Figma(4px)와 다르다
         tab_parts = []

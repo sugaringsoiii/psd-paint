@@ -685,3 +685,48 @@ def panel_backgrounds(labels, frame, margin=8):
                 and rb[1].start <= pb[1].start + margin and rb[1].stop >= pb[1].stop - margin):
             out.add(r)
     return out
+
+
+# ---- 프리셋 묶음 (다른 컴퓨터·동료와 주고받기) ----
+BUNDLE_SUFFIX = ".psdpaint"
+
+
+def export_bundle(path, presets, profiles):
+    """색상 프리셋과 캐릭터 프로필(대표 그림 포함)을 한 파일(zip)로 내보낸다."""
+    import zipfile
+
+    items = []
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in profiles:
+            img = p.get("image") or ""
+            name = ""
+            if img and Path(img).exists():
+                name = f"characters/{p['name']}{Path(img).suffix.lower() or '.png'}"
+                z.write(img, name)
+            items.append({"name": p["name"], "look": p.get("look", ""), "image": name})
+        z.writestr("psd-paint.json", json.dumps({"version": 1, "presets": presets, "characters": items},
+                                                ensure_ascii=False, indent=1))
+
+
+def import_bundle(path):
+    """→ (presets, profiles). 대표 그림은 앱 데이터 폴더에 풀어 둔다."""
+    import zipfile
+
+    with zipfile.ZipFile(path) as z:
+        try:
+            data = json.loads(z.read("psd-paint.json"))
+        except KeyError:
+            raise ValueError("psd-paint 프리셋 파일이 아닙니다.") from None
+        folder = data_dir() / "characters"
+        folder.mkdir(parents=True, exist_ok=True)
+        profiles = []
+        for c in data.get("characters", []):
+            img = ""
+            if c.get("image"):
+                dest = folder / Path(c["image"]).name
+                dest.write_bytes(z.read(c["image"]))
+                img = str(dest)
+            profiles.append({"name": c["name"], "look": c.get("look", ""), "image": img})
+    presets = [{"name": p["name"], "rgb": [int(v) for v in p["rgb"]]} for p in data.get("presets", [])
+               if isinstance(p.get("name"), str)]
+    return presets, profiles
