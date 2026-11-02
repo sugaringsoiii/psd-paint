@@ -1,26 +1,21 @@
 """psd-paint 데스크톱 앱: PSD 여러 개를 넣고 순서대로 밑색을 칠한다."""
+import json
 import os
-import re
 import subprocess
 import sys
 import time
 import traceback
-import json
-from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 from PIL.ImageQt import ImageQt
-from PySide6.QtCore import QByteArray, QEvent, QPoint, QEventLoop, QObject, QRect, QRectF, QSettings, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QRect, QRectF, QSettings, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (QColor, QCursor, QFont, QFontDatabase, QFontMetrics, QIcon, QKeySequence, QPainter,
-                           QPainterPath, QPalette, QPen, QPixmap, QShortcut)
-from PySide6.QtSvg import QSvgRenderer
+                           QPalette, QPen, QPixmap, QShortcut)
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog, QFileDialog, QFrame,
-    QGraphicsDropShadowEffect,
-    QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame,
+    QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
     QPlainTextEdit, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
     QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTabBar,
     QTabWidget,
@@ -32,6 +27,9 @@ from dataclasses import replace
 
 from . import __version__, ai, style
 from .palette import read_palette
+from .widgets import (MOD, ColorPicker, Combo, Dialog, RoundScroll, Tip, button, card, color_field,
+                      Popup, clear_layout, hbox0, icon, label, search_box,
+                      to_hex)
 from .cli import output_path
 from .core import (AwaitingAnswer, Options, PaintError, next_options, paint, quick_preview, region_at,
                    repaint, set_region)
@@ -90,77 +88,6 @@ def open_path(path, reveal=False, app=None):
         subprocess.Popen(["xdg-open", str(Path(path).parent) if reveal else path])
 
 
-def card(*widgets, margins=(14, 12, 14, 12), spacing=10):
-    w = QWidget()
-    w.setObjectName("card")
-    w.setAttribute(Qt.WA_StyledBackground, True)
-    lay = QVBoxLayout(w)
-    lay.setContentsMargins(*margins)
-    lay.setSpacing(spacing)
-    for x in widgets:
-        lay.addWidget(x) if isinstance(x, QWidget) else lay.addLayout(x)
-    return w, lay
-
-
-def label(text, name=None):
-    lb = QLabel(text)
-    if name:
-        lb.setObjectName(name)
-    return lb
-
-
-@lru_cache
-def icon(name, color, off=style.FAINT, gap=3):
-    """assets/icons 의 아이콘을 color 로 칠한다. 꺼진 버튼에서는 off 색.
-
-    gap: 아이콘 오른쪽에 비워 둘 px. Qt 가 아이콘과 글자 사이에 두는 1px 와 합쳐 Figma 의 4px 가 된다.
-    """
-    svg = (Path(__file__).parent / "assets" / "icons" / f"{name}.svg").read_text()
-    ic = QIcon()
-    for mode, c in ((QIcon.Normal, color), (QIcon.Disabled, off)):
-        renderer = QSvgRenderer(QByteArray(re.sub(r'fill="#000"', f'fill="{c}"', svg).encode()))
-        size = renderer.defaultSize()
-        pm = QPixmap((size.width() + gap) * 2, size.height() * 2)  # 레티나에서도 또렷하게 2배로 그린다
-        pm.fill(Qt.transparent)
-        p = QPainter(pm)
-        renderer.render(p, QRectF(0, 0, size.width() * 2, size.height() * 2))
-        p.end()
-        pm.setDevicePixelRatio(2)
-        ic.addPixmap(pm, mode)
-    return ic
-
-
-def hbox0(*widgets):
-    """간격 없이 붙인 가로 줄."""
-    h = QHBoxLayout()
-    h.setSpacing(0)
-    for w in widgets:
-        h.addWidget(w)
-    return h
-
-
-def search_box(placeholder):
-    """돋보기 아이콘이 붙은 검색 입력칸."""
-    edit = QLineEdit()
-    edit.setObjectName("search")
-    edit.setPlaceholderText(placeholder)
-    edit.setClearButtonEnabled(True)
-    edit.addAction(icon("search", style.FAINT, gap=0), QLineEdit.LeadingPosition)
-    return edit
-
-
-def button(text, kind=None, icon_name=None):
-    """kind: None(기본)·"primary"·"ghost". 아이콘 색은 버튼 글자색을 따른다."""
-    b = QPushButton(text)
-    if kind:
-        b.setObjectName(kind)
-    if icon_name:
-        color = {"primary": "white", "ghost": style.MUTED}.get(kind, style.TEXT)
-        b.setIcon(icon(icon_name, color, "white" if kind == "primary" else style.FAINT))
-        b.setIconSize(QSize(19, 16))  # icon() 참고
-    return b
-
-
 class Worker(QObject):
     """파일 목록을 순서대로 처리한다. 중지 요청은 지금 파일을 마친 뒤 반영한다."""
     started_file = Signal(int)
@@ -211,7 +138,7 @@ class FileList(QTreeWidget):
     def __init__(self):
         super().__init__()
         self.setHeaderLabels(["파일", "상태", "결과"])
-        self.setItemDelegate(KeepColor(self))
+        self.setItemDelegate(StatusDelegate(self))
         self.setRootIsDecorated(False)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setAcceptDrops(True)
@@ -274,7 +201,7 @@ class FileList(QTreeWidget):
         p.end()
 
 
-class KeepColor(QStyledItemDelegate):
+class StatusDelegate(QStyledItemDelegate):
     """선택된 행에서도 상태·결과 칸의 글자색을 그대로 둔다. 상태 아이콘은 글자와 4px 띄워 직접 그린다."""
 
     def initStyleOption(self, opt, index):
@@ -360,363 +287,157 @@ class PreviewCanvas(QWidget):
             self.clicked.emit(x / r.width(), y / r.height())
 
 
-def swatch(rgb, size=14):
-    pm = QPixmap(size, size)
-    pm.fill(QColor(*rgb))
-    p = QPainter(pm)
-    p.setPen(QColor(style.BORDER_HI))
-    p.drawRect(0, 0, size - 1, size - 1)
-    p.end()
-    return QIcon(pm)
+class PresetsTab(QWidget):
+    """색상 프리셋 탭. 자주 쓰는 레이어 이름·색을 저장해 두면 미리보기 영역 메뉴 맨 위에 늘 나온다.
 
+    presets: [{"name", "rgb"}]. 바꿀 때마다 설정(QSettings "presets")에 JSON 으로 저장한다.
+    """
 
-class RoundScroll(QScrollArea):
-    """둥근 테두리 스크롤 영역. 그림과 스크롤바가 모서리를 덮지 않게 위에 모서리·테두리를 다시 그린다."""
-
-    def __init__(self):
+    def __init__(self, settings):
         super().__init__()
-        self.corners = QWidget(self)
-        self.corners.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self.corners.paintEvent = self.paint_corners
+        self.settings = settings
+        try:
+            self.presets = [{"name": p["name"], "rgb": [int(v) for v in p["rgb"]]}
+                            for p in json.loads(self.settings.value("presets", "[]"))
+                            if isinstance(p["name"], str)]  # 예전 [추가] 버그로 생긴 name=false 줄은 버린다
+        except (ValueError, KeyError, TypeError):  # 망가진 값이면 빈 목록으로 시작
+            self.presets = []
+        add_btn = button("추가", "ghost", "plus")
+        add_btn.clicked.connect(lambda: self.add())  # clicked 의 checked 값이 name 으로 들어가지 않게
+        import_btn = button("가져오기", "ghost", "download")
+        import_btn.setToolTip("포토샵 색상 견본(.aco·.ase)의 색을 한 번에 추가합니다.")
+        import_btn.clicked.connect(self.import_palette)
+        top = QHBoxLayout()
+        top.addWidget(label("색상 프리셋", "section"))
+        top.addStretch()
+        top.addLayout(hbox0(import_btn, add_btn))
+        note = label("저장한 색은 미리보기에서 영역을 누르면 맨 위에 나옵니다. "
+                     "머리·피부·눈처럼 자주 쓰는 색을 넣어 두세요.", "summary")
+        note.setWordWrap(True)
+        head = QWidget()  # 표 머리: 색 | 이름 | 값 — 파일 목록 표와 같은 모양, 칸 글자 시작점에 맞춘다
+        head.setObjectName("tableHead")
+        head.setAttribute(Qt.WA_StyledBackground, True)
+        hh = QHBoxLayout(head)
+        hh.setContentsMargins(4, 6, 4, 6)
+        hh.setSpacing(8)
+        for text, w, indent in (("색", PRESET_ROW, 5), ("이름", 0, 7), ("값", 96, 7), ("", PRESET_ROW, 0)):
+            lb = label(text, "section")
+            lb.setContentsMargins(indent, 0, 0, 0)
+            if w:
+                lb.setFixedWidth(w)
+            hh.addWidget(lb, 0 if w else 1)
+        self.box = QVBoxLayout()
+        self.box.setSpacing(0)
+        self.empty = label("", "muted")
+        inner = QWidget()
+        iv = QVBoxLayout(inner)
+        iv.setContentsMargins(0, 0, 0, 8)
+        iv.setSpacing(12)
+        iv.addLayout(self.box)
+        iv.addWidget(self.empty)
+        iv.addStretch()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(inner)
+        pv = QVBoxLayout(self)
+        pv.setContentsMargins(0, 8, 0, 0)
+        pv.setSpacing(12)
+        self.search = search_box("이름·색 검색")
+        self.search.textChanged.connect(self.filter)
+        pv.addLayout(top)
+        pv.addWidget(note)
+        pv.addWidget(self.search)
+        table = QVBoxLayout()
+        table.setSpacing(0)
+        table.addWidget(head)
+        table.addWidget(scroll, 1)
+        pv.addLayout(table, 1)
+        self.render()
 
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self.corners.setGeometry(self.rect())
-        self.corners.raise_()  # 스크롤바보다 위
+    def render(self):
+        clear_layout(self.box)
+        for p in self.presets:
+            row = QWidget()
+            row.setObjectName("tableRow")
+            row.setAttribute(Qt.WA_StyledBackground, True)
+            row.setAttribute(Qt.WA_Hover, True)
+            row.setFixedHeight(34)  # 파일 목록 행과 같은 높이
+            h = QHBoxLayout(row)
+            h.setContentsMargins(4, 0, 4, 0)
+            h.setSpacing(8)
+            colors, btn, hex_edit = color_field(p["rgb"], PRESET_ROW)
+            name = QLineEdit(p["name"])
+            name.setPlaceholderText("이름 (예: 주인공 머리)")
+            for e in (name, hex_edit):
+                e.setObjectName("cell")  # 평소엔 글자만, 올리거나 누르면 입력칸 테두리
+            delete = button("", "ghost", "delete")
+            delete.setFixedSize(PRESET_ROW, PRESET_ROW)
+            delete.setIcon(icon("delete", style.MUTED, gap=0))  # 글자 없는 버튼이라 아이콘만 가운데
+            delete.setStyleSheet("padding: 0;")
+            delete.setToolTip("삭제")
+            h.addWidget(btn)
+            h.addWidget(name, 1)
+            h.addWidget(hex_edit)
+            h.addWidget(delete)
+            btn.changed.connect(lambda c, p=p: (p.__setitem__("rgb", list(c)), self.save()))
+            name.editingFinished.connect(lambda p=p, e=name: (p.__setitem__("name", e.text().strip()),
+                                                              self.save()))
+            delete.clicked.connect(lambda _=False, p=p: self.remove(p))
+            row.preset = p
+            self.box.addWidget(row)
+        self.filter()
 
-    def paint_corners(self, e):
-        p = QPainter(self.corners)
-        p.setRenderHint(QPainter.Antialiasing)
-        box = QPainterPath()
-        box.addRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 8, 8)
-        outside = QPainterPath()
-        outside.addRect(QRectF(self.rect()))
-        p.fillPath(outside - box, QColor(style.PANEL))  # 모서리 밖은 카드 바탕색
-        p.setPen(QColor(style.BORDER))
-        p.drawPath(box)
+    def filter(self):
+        """검색어가 이름이나 #색에 든 줄만 보인다."""
+        q = self.search.text().strip().lower()
+        shown = 0
+        for i in range(self.box.count()):
+            row = self.box.itemAt(i).widget()
+            p = row.preset
+            hit = not q or q in p["name"].lower() or q in to_hex(p["rgb"]).lower()
+            row.setVisible(hit)
+            shown += hit
+        self.empty.setText("검색 결과가 없어요." if self.presets else
+                                  "아직 프리셋이 없어요. [추가]를 눌러 첫 색을 만들어 보세요.")
+        self.empty.setVisible(not shown)
 
+    def save(self):
+        self.settings.setValue("presets", json.dumps(self.presets, ensure_ascii=False))
 
-MOD = "⌘" if sys.platform == "darwin" else "Ctrl"  # 툴팁 키캡에 쓰는 단축키 표시
+    def add(self, name="", rgb=(200, 200, 200)):
+        if not name:
+            self.search.clear()  # 검색 중이면 새 빈 줄이 걸러져 안 보인다
+        self.presets.append({"name": name, "rgb": list(rgb)})
+        self.save()
+        self.render()
+        if not name:  # 새 줄의 이름 칸으로 바로 입력
+            edit = self.box.itemAt(self.box.count() - 1).widget().findChild(QLineEdit)
+            QTimer.singleShot(0, edit.setFocus)
 
+    def import_palette(self):
+        path, _ = QFileDialog.getOpenFileName(self, "색상 견본 가져오기", self.settings.value("last_dir", ""),
+                                              "색상 견본 (*.aco *.ase)")
+        if not path:
+            return
+        try:
+            colors = read_palette(path)
+        except (ValueError, OSError) as e:
+            Dialog(self, "가져오지 못했습니다.", str(e) or "파일을 읽을 수 없습니다.", cancel=False).exec()
+            return
+        new = [{"name": n, "rgb": list(c)} for n, c in colors]
+        new = [p for i, p in enumerate(new) if p not in self.presets and p not in new[:i]]  # 같은 이름·색은 한 번만
+        self.presets += new
+        self.save()
+        self.render()
+        skipped = len(colors) - len(new)
+        Dialog(self, f"색 {len(new)}개를 가져왔어요.", f"이미 있는 {skipped}개는 건너뛰었어요." if skipped else "",
+               cancel=False).exec()
 
-class Tip(QWidget):
-    """Linear 풍 툴팁: 흰 카드에 글자와 단축키 키캡. 툴팁 글자에 탭 뒤로 키를 적는다 (예: "되돌리기\t⌘ Z")."""
-
-    def __init__(self):
-        super().__init__(None, Qt.ToolTip | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.owner = self.full = None
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(8, 4, 8, 10)  # 그림자 자리
-        card_ = QFrame()
-        card_.setObjectName("tip")
-        card_.setAttribute(Qt.WA_StyledBackground, True)
-        shadow = QGraphicsDropShadowEffect(card_)
-        shadow.setBlurRadius(16)
-        shadow.setOffset(0, 3)
-        shadow.setColor(QColor(0, 0, 0, 30))
-        card_.setGraphicsEffect(shadow)
-        outer.addWidget(card_)
-        row = QHBoxLayout(card_)
-        row.setContentsMargins(10, 6, 6, 6)
-        row.setSpacing(8)
-        self.text = label("", "tipText")
-        row.addWidget(self.text)
-        self.keys = QHBoxLayout()
-        self.keys.setSpacing(3)
-        row.addLayout(self.keys)
-
-    def show_for(self, owner, text, pos):
-        body, _, keys = text.partition("\t")
-        self.text.setText(body)
-        while self.keys.count():
-            old = self.keys.takeAt(0).widget()
-            old.hide()  # 지워지기 전까지 크기 계산에 끼지 않게
-            old.deleteLater()
-        for k in keys.split():
-            cap = label(k, "keycap")
-            cap.setAlignment(Qt.AlignCenter)
-            self.keys.addWidget(cap)
-        self.owner, self.full = owner, text
-        self.hide()
-        self.layout().invalidate()  # 바뀐 글자 크기로 다시 잰다
-        self.layout().activate()
-        self.resize(self.sizeHint())
-        area = (QApplication.screenAt(pos) or QApplication.primaryScreen()).availableGeometry()
-        x = min(pos.x() - 8, area.right() - self.width())
-        y = pos.y() + 18
-        if y + self.height() > area.bottom():  # 아래 자리가 없으면 커서 위로
-            y = pos.y() - self.height() - 4
-        self.move(max(area.left(), x), y)
-        self.show()
-
-
-class Popup(QWidget):
-    """둥근 카드에 그림자를 둔 팝업. 영역 색 고르기·드롭다운·우클릭 메뉴가 모두 이 모양을 쓴다."""
-
-    def __init__(self, parent, width=None):
-        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
-        # 창은 투명하게, 안쪽 카드에만 둥근 모서리와 그림자를 준다 (창이 사각이면 모서리가 각져 보인다)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.choice = False
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(*self.MARGINS)
-        card_ = QFrame()
-        card_.setObjectName("picker")
-        card_.setAttribute(Qt.WA_StyledBackground, True)
-        shadow = QGraphicsDropShadowEffect(card_)
-        shadow.setBlurRadius(24)
-        shadow.setOffset(0, 6)
-        shadow.setColor(QColor(0, 0, 0, 45))
-        card_.setGraphicsEffect(shadow)
-        outer.addWidget(card_)
-        self.body = QVBoxLayout(card_)
-        self.body.setContentsMargins(4, 4, 4, 4)
-        self.body.setSpacing(2)
-        if width:
-            card_.setFixedWidth(width)
-
-    MARGINS = (10, 6, 10, 14)  # 그림자가 들어갈 자리 (왼·위·오른·아래)
-
-    def item(self, text, data, enabled=True):
-        btn = QPushButton(text)
-        btn.setObjectName("pickerItem")
-        btn.setEnabled(enabled)
-        btn.clicked.connect(lambda _=False: self.done(data))
-        self.body.addWidget(btn)
-        return btn
-
-    def line(self):
-        ln = QFrame()
-        ln.setObjectName("pickerLine")
-        ln.setFixedHeight(1)
-        self.body.addWidget(ln)
-
-    def list(self, entries, current=-1, max_h=300, search=False):
-        """entries: [(아이콘 또는 None, 글자, 값, 고를 수 있나)] 를 한 열 목록으로 넣는다. 값이 None 이면 구역 머리.
-
-        search 면 위에 검색칸을 두고, 글자에 검색어가 든 항목만 보인다. Enter 는 첫 항목을 고른다.
-        """
-        lst = QListWidget()
-        lst.setObjectName("pickerList")
-        lst.setIconSize(QSize(14, 14))
-        lst.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        for ic, text, data, enabled in entries:
-            it = QListWidgetItem(ic, text) if ic else QListWidgetItem(text)
-            it.setData(Qt.UserRole, data)
-            if not enabled:
-                it.setFlags(Qt.NoItemFlags)
-            if data is None:  # 구역 머리 (프리셋 / 이 파일)
-                f = QFont(lst.font())
-                f.setPixelSize(12)
-                it.setFont(f)
-            lst.addItem(it)
-        if current >= 0:
-            lst.setCurrentRow(current)
-        lst.itemClicked.connect(lambda it: self.done(it.data(Qt.UserRole)))
-        if search:
-            edit = search_box("이름·색 검색")
-            max_h -= 36  # 검색칸만큼 목록을 줄인다
-
-            def filter_(text):
-                q = text.strip().lower()
-                for i in range(lst.count()):
-                    it = lst.item(i)
-                    # 검색 중에는 구역 머리를 숨긴다
-                    it.setHidden(bool(q) and (it.data(Qt.UserRole) is None or q not in it.text().lower()))
-
-            def first():
-                for i in range(lst.count()):
-                    it = lst.item(i)
-                    if not it.isHidden() and it.flags() & Qt.ItemIsEnabled:
-                        return self.done(it.data(Qt.UserRole))
-            edit.textChanged.connect(filter_)
-            edit.returnPressed.connect(first)
-            self.body.addWidget(edit)
-            QTimer.singleShot(0, edit.setFocus)  # 뜨자마자 바로 입력
-        lst.setFixedHeight(max(30, min(len(entries) * 30 + 6, max_h)))  # 항목 높이 30
-        self.body.addWidget(lst)
-        return lst
-
-    def done(self, data):
-        self.choice = data
-        self.close()
-
-    def keyPressEvent(self, e):
-        if e.key() == Qt.Key_Escape:
-            self.close()
-        else:
-            super().keyPressEvent(e)
-
-    def pick(self, pos):
-        """카드 왼쪽 위를 pos(전역 좌표)에 맞춰 띄우고 고를 때까지 기다린다. → 고른 값, 취소면 False"""
-        self.adjustSize()
-        screen = QApplication.screenAt(pos) or QApplication.primaryScreen()
-        area = screen.availableGeometry()
-        x = min(pos.x() - self.MARGINS[0], area.right() - self.width())
-        y = min(pos.y() - self.MARGINS[1], area.bottom() - self.height())
-        self.move(max(area.left(), x), max(area.top(), y))
-        loop = QEventLoop()
-        self.destroyed.connect(loop.quit)
-        self.setAttribute(Qt.WA_DeleteOnClose, False)
-        self.show()
-        while self.isVisible():
-            loop.processEvents(QEventLoop.WaitForMoreEvents)
-        return self.choice
-
-
-class Combo(QComboBox):
-    """목록을 Popup 모양으로 띄우는 콤보박스."""
-
-    def showPopup(self):
-        pop = Popup(self, self.width())
-        model = self.model()
-        pop.list([(self.itemIcon(i) if not self.itemIcon(i).isNull() else None, self.itemText(i), i,
-                   bool(model.flags(model.index(i, 0)) & Qt.ItemIsEnabled)) for i in range(self.count())],
-                 self.currentIndex(), search=self.count() > 8)  # 긴 목록(모델 등)만 검색칸
-        i = pop.pick(self.mapToGlobal(QPoint(0, self.height() + 4)))
-        if i is not False:
-            self.setCurrentIndex(i)
-
-
-class Dialog(QDialog):
-    """Linear 풍 확인 창: 둥근 카드에 제목·설명·[취소][확인]. field 를 주면 입력칸을 함께 보인다."""
-
-    def __init__(self, parent, title, text="", field=None, cancel=True):
-        super().__init__(parent, Qt.Dialog | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 12, 16, 20)  # 그림자 자리
-        card_ = QFrame()
-        card_.setObjectName("dialog")
-        card_.setAttribute(Qt.WA_StyledBackground, True)
-        card_.setFixedWidth(360)
-        shadow = QGraphicsDropShadowEffect(card_)
-        shadow.setBlurRadius(40)
-        shadow.setOffset(0, 8)
-        shadow.setColor(QColor(0, 0, 0, 50))
-        card_.setGraphicsEffect(shadow)
-        outer.addWidget(card_)
-        lay = QVBoxLayout(card_)
-        lay.setContentsMargins(20, 18, 20, 16)
-        lay.setSpacing(12)
-        lay.addWidget(label(title, "dialogTitle"))
-        if text:
-            body = label(text, "muted")
-            body.setWordWrap(True)
-            lay.addWidget(body)
-        if field is not None:
-            lay.addWidget(field)
-            field.setFocus()
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        row.addStretch()
-        if cancel:
-            no = button("취소")
-            no.setAutoDefault(False)
-            no.clicked.connect(self.reject)
-            row.addWidget(no)
-        ok = button("확인", "primary")
-        ok.setDefault(True)
-        ok.clicked.connect(self.accept)
-        row.addWidget(ok)
-        lay.addSpacing(4)
-        lay.addLayout(row)
-
-    def showEvent(self, e):
-        super().showEvent(e)
-        if self.parent():  # 부모 창 가운데에 띄운다
-            win = self.parent().window().frameGeometry()
-            self.move(win.center() - self.rect().center())
-
-
-class ColorPicker(Popup):
-    """영역 색 고르기 팝업. 상단 고정(지금 상태·비우기·새 레이어) + 한 열 색 목록(최대 높이 안에서 스크롤)."""
-    MAX_H = 420
-
-    def __init__(self, parent, current, entries, can_clear, presets=()):
-        """entries·presets: [(글자, RGB, 값, 고를 수 있나)]. 프리셋이 있으면 '프리셋'·'이 파일'로 나눠 보인다."""
-        super().__init__(parent, 230)
-        self.body.setContentsMargins(4, 6, 4, 4)
-        self.body.addWidget(label(f"지금: {current}", "pickerHead"))
-        self.item("칠하지 않음 (비우기)", "clear", can_clear)
-        self.item("새 레이어…", "new")
-        self.line()
-        top_h = self.body.sizeHint().height()
-        rows = [(swatch(rgb), text, data, enabled) for text, rgb, data, enabled in presets]
-        if presets:
-            rows.insert(0, (None, "프리셋", None, False))
-            if entries:
-                rows.append((None, "이 파일", None, False))
-        rows += [(swatch(rgb), text, data, enabled) for text, rgb, data, enabled in entries]
-        self.list(rows, max_h=self.MAX_H - top_h - 10, search=True)
-
-
-def parse_hex(text):
-    """'#RRGGBB'(# 생략 가능) → (r, g, b). 틀리면 None"""
-    m = re.fullmatch(r"#?([0-9a-fA-F]{6})", text.strip())
-    return tuple(int(m.group(1)[i:i + 2], 16) for i in (0, 2, 4)) if m else None
-
-
-def to_hex(rgb):
-    return "#{:02X}{:02X}{:02X}".format(*rgb)
-
-
-class ColorButton(QPushButton):
-    """누르면 색 고르기 창이 뜨는 색 칸. 바뀌면 changed(RGB)."""
-    changed = Signal(tuple)
-
-    def __init__(self, rgb, size=style.INPUT_H):
-        super().__init__()
-        self.setObjectName("swatch")
-        self.setFixedSize(size, size)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setToolTip("색 고르기")
-        self.rgb = tuple(rgb)
-        self.clicked.connect(self.choose)
-
-    def set_rgb(self, rgb):
-        self.rgb = tuple(rgb)
-        self.update()
-
-    def choose(self):
-        c = QColorDialog.getColor(QColor(*self.rgb), self.window(), "색 고르기")
-        if c.isValid():
-            self.set_rgb((c.red(), c.green(), c.blue()))
-            self.changed.emit(self.rgb)
-
-    def paintEvent(self, e):
-        super().paintEvent(e)  # 테두리·hover 는 스타일시트
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(QColor(style.BORDER_HI))
-        p.setBrush(QColor(*self.rgb))
-        box = QRectF(0, 0, 16, 16)
-        box.moveCenter(QRectF(self.rect()).center())
-        p.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), 4, 4)
-
-
-def color_field(rgb, size=style.INPUT_H):
-    """[색 칸][#RRGGBB] 한 줄. → (줄 레이아웃, 색 칸, 글자 칸). 둘 중 하나를 바꾸면 다른 쪽도 따라간다."""
-    btn = ColorButton(rgb, size)
-    hex_edit = QLineEdit(to_hex(rgb))
-    hex_edit.setFixedWidth(96)
-    btn.changed.connect(lambda c: hex_edit.setText(to_hex(c)))
-
-    def typed():
-        c = parse_hex(hex_edit.text())
-        if c:
-            btn.set_rgb(c)
-            btn.changed.emit(c)
-        hex_edit.setText(to_hex(btn.rgb))  # 틀린 값은 되돌린다
-    hex_edit.editingFinished.connect(typed)
-    row = QHBoxLayout()
-    row.setSpacing(8)
-    row.addWidget(btn)
-    row.addWidget(hex_edit)
-    return row, btn, hex_edit
+    def remove(self, p):
+        self.presets.remove(p)
+        self.save()
+        self.render()
 
 
 class MainWindow(QMainWindow):
@@ -914,7 +635,8 @@ class MainWindow(QMainWindow):
         tabs.addTab(pv, "")
 
         tabs.addTab(self.build_settings(), "")
-        tabs.addTab(self.build_presets(), "")
+        self.presets = PresetsTab(self.settings)
+        tabs.addTab(self.presets, "")
         # 탭 이름은 직접 그린다. Qt 탭은 아이콘과 글자 사이가 11px 가까이 벌어져 Figma(4px)와 다르다
         tab_parts = []
         for i, (name, text) in enumerate((("preview", "미리보기"), ("settings", "설정"), ("palette", "색상 프리셋"))):
@@ -1171,157 +893,6 @@ class MainWindow(QMainWindow):
         pv.setContentsMargins(0, 8, 0, 0)
         pv.addWidget(scroll)
         return page
-
-    # ---- 색상 프리셋 ----
-    def build_presets(self):
-        """색상 프리셋 탭. 자주 쓰는 레이어 이름·색을 저장해 두면 미리보기 영역 메뉴 맨 위에 늘 나온다."""
-        try:
-            self.presets = [{"name": p["name"], "rgb": [int(v) for v in p["rgb"]]}
-                            for p in json.loads(self.settings.value("presets", "[]"))
-                            if isinstance(p["name"], str)]  # 예전 [추가] 버그로 생긴 name=false 줄은 버린다
-        except (ValueError, KeyError, TypeError):  # 망가진 값이면 빈 목록으로 시작
-            self.presets = []
-        add_btn = button("추가", "ghost", "plus")
-        add_btn.clicked.connect(lambda: self.add_preset())  # clicked 의 checked 값이 name 으로 들어가지 않게
-        import_btn = button("가져오기", "ghost", "download")
-        import_btn.setToolTip("포토샵 색상 견본(.aco·.ase)의 색을 한 번에 추가합니다.")
-        import_btn.clicked.connect(self.import_palette)
-        top = QHBoxLayout()
-        top.addWidget(label("색상 프리셋", "section"))
-        top.addStretch()
-        top.addLayout(hbox0(import_btn, add_btn))
-        note = label("저장한 색은 미리보기에서 영역을 누르면 맨 위에 나옵니다. "
-                     "머리·피부·눈처럼 자주 쓰는 색을 넣어 두세요.", "summary")
-        note.setWordWrap(True)
-        head = QWidget()  # 표 머리: 색 | 이름 | 값 — 파일 목록 표와 같은 모양, 칸 글자 시작점에 맞춘다
-        head.setObjectName("tableHead")
-        head.setAttribute(Qt.WA_StyledBackground, True)
-        hh = QHBoxLayout(head)
-        hh.setContentsMargins(4, 6, 4, 6)
-        hh.setSpacing(8)
-        for text, w, indent in (("색", PRESET_ROW, 5), ("이름", 0, 7), ("값", 96, 7), ("", PRESET_ROW, 0)):
-            lb = label(text, "section")
-            lb.setContentsMargins(indent, 0, 0, 0)
-            if w:
-                lb.setFixedWidth(w)
-            hh.addWidget(lb, 0 if w else 1)
-        self.preset_box = QVBoxLayout()
-        self.preset_box.setSpacing(0)
-        self.preset_empty = label("", "muted")
-        inner = QWidget()
-        iv = QVBoxLayout(inner)
-        iv.setContentsMargins(0, 0, 0, 8)
-        iv.setSpacing(12)
-        iv.addLayout(self.preset_box)
-        iv.addWidget(self.preset_empty)
-        iv.addStretch()
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setWidget(inner)
-        page = QWidget()
-        pv = QVBoxLayout(page)
-        pv.setContentsMargins(0, 8, 0, 0)
-        pv.setSpacing(12)
-        self.preset_search = search_box("이름·색 검색")
-        self.preset_search.textChanged.connect(self.filter_presets)
-        pv.addLayout(top)
-        pv.addWidget(note)
-        pv.addWidget(self.preset_search)
-        table = QVBoxLayout()
-        table.setSpacing(0)
-        table.addWidget(head)
-        table.addWidget(scroll, 1)
-        pv.addLayout(table, 1)
-        self.render_presets()
-        return page
-
-    def render_presets(self):
-        while self.preset_box.count():
-            old = self.preset_box.takeAt(0).widget()
-            old.hide()  # 지워지기 전까지 겹쳐 보이지 않게
-            old.deleteLater()
-        for p in self.presets:
-            row = QWidget()
-            row.setObjectName("tableRow")
-            row.setAttribute(Qt.WA_StyledBackground, True)
-            row.setAttribute(Qt.WA_Hover, True)
-            row.setFixedHeight(34)  # 파일 목록 행과 같은 높이
-            h = QHBoxLayout(row)
-            h.setContentsMargins(4, 0, 4, 0)
-            h.setSpacing(8)
-            colors, btn, hex_edit = color_field(p["rgb"], PRESET_ROW)
-            name = QLineEdit(p["name"])
-            name.setPlaceholderText("이름 (예: 주인공 머리)")
-            for e in (name, hex_edit):
-                e.setObjectName("cell")  # 평소엔 글자만, 올리거나 누르면 입력칸 테두리
-            delete = button("", "ghost", "delete")
-            delete.setFixedSize(PRESET_ROW, PRESET_ROW)
-            delete.setIcon(icon("delete", style.MUTED, gap=0))  # 글자 없는 버튼이라 아이콘만 가운데
-            delete.setStyleSheet("padding: 0;")
-            delete.setToolTip("삭제")
-            h.addWidget(btn)
-            h.addWidget(name, 1)
-            h.addWidget(hex_edit)
-            h.addWidget(delete)
-            btn.changed.connect(lambda c, p=p: (p.__setitem__("rgb", list(c)), self.save_presets()))
-            name.editingFinished.connect(lambda p=p, e=name: (p.__setitem__("name", e.text().strip()),
-                                                              self.save_presets()))
-            delete.clicked.connect(lambda _=False, p=p: self.remove_preset(p))
-            row.preset = p
-            self.preset_box.addWidget(row)
-        self.filter_presets()
-
-    def filter_presets(self):
-        """검색어가 이름이나 #색에 든 줄만 보인다."""
-        q = self.preset_search.text().strip().lower()
-        shown = 0
-        for i in range(self.preset_box.count()):
-            row = self.preset_box.itemAt(i).widget()
-            p = row.preset
-            hit = not q or q in p["name"].lower() or q in to_hex(p["rgb"]).lower()
-            row.setVisible(hit)
-            shown += hit
-        self.preset_empty.setText("검색 결과가 없어요." if self.presets else
-                                  "아직 프리셋이 없어요. [추가]를 눌러 첫 색을 만들어 보세요.")
-        self.preset_empty.setVisible(not shown)
-
-    def save_presets(self):
-        self.settings.setValue("presets", json.dumps(self.presets, ensure_ascii=False))
-
-    def add_preset(self, name="", rgb=(200, 200, 200)):
-        if not name:
-            self.preset_search.clear()  # 검색 중이면 새 빈 줄이 걸러져 안 보인다
-        self.presets.append({"name": name, "rgb": list(rgb)})
-        self.save_presets()
-        self.render_presets()
-        if not name:  # 새 줄의 이름 칸으로 바로 입력
-            edit = self.preset_box.itemAt(self.preset_box.count() - 1).widget().findChild(QLineEdit)
-            QTimer.singleShot(0, edit.setFocus)
-
-    def import_palette(self):
-        path, _ = QFileDialog.getOpenFileName(self, "색상 견본 가져오기", self.settings.value("last_dir", ""),
-                                              "색상 견본 (*.aco *.ase)")
-        if not path:
-            return
-        try:
-            colors = read_palette(path)
-        except (ValueError, OSError) as e:
-            Dialog(self, "가져오지 못했습니다.", str(e) or "파일을 읽을 수 없습니다.", cancel=False).exec()
-            return
-        new = [{"name": n, "rgb": list(c)} for n, c in colors]
-        new = [p for i, p in enumerate(new) if p not in self.presets and p not in new[:i]]  # 같은 이름·색은 한 번만
-        self.presets += new
-        self.save_presets()
-        self.render_presets()
-        skipped = len(colors) - len(new)
-        Dialog(self, f"색 {len(new)}개를 가져왔어요.", f"이미 있는 {skipped}개는 건너뛰었어요." if skipped else "",
-               cancel=False).exec()
-
-    def remove_preset(self, p):
-        self.presets.remove(p)
-        self.save_presets()
-        self.render_presets()
 
     # ---- 설정 ----
     def save_settings(self):
@@ -1756,7 +1327,8 @@ class MainWindow(QMainWindow):
         """obj 의 툴팁 글자. 목록 화면이면 pos 아래 칸의 툴팁"""
         view = obj.parent()
         if isinstance(view, QAbstractItemView) and obj is view.viewport():
-            return view.indexAt(pos).data(Qt.ToolTipRole) or ""
+            idx, d = view.indexAt(pos), view.itemDelegate()
+            return (d.tip(view, idx) if hasattr(d, "tip") else "") or idx.data(Qt.ToolTipRole) or ""
         return obj.toolTip()
 
     def eventFilter(self, obj, e):
@@ -1865,10 +1437,10 @@ class MainWindow(QMainWindow):
 
         cur_key = (st["keys"][cur][0], tuple(int(v) for v in st["keys"][cur][1])) if cur >= 0 else None
         cur_label = labels.get(cur_key) if cur_key else None
-        items = [(f"{labels[(name, rgb)]}   #{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}", rgb, [name, list(rgb)],
+        items = [(labels[(name, rgb)], rgb, [name, list(rgb)],
                   (name, rgb) != cur_key) for name, rgb, _ in entries]
-        presets = [(f"{p['name']}   {to_hex(p['rgb'])}", tuple(p["rgb"]), [p["name"], list(p["rgb"])],
-                    (p["name"], tuple(p["rgb"])) != cur_key) for p in self.presets if p["name"]]
+        presets = [(p["name"], tuple(p["rgb"]), [p["name"], list(p["rgb"])],
+                    (p["name"], tuple(p["rgb"])) != cur_key) for p in self.presets.presets if p["name"]]
         data = ColorPicker(self, cur_label or "칠하지 않음", items, cur >= 0, presets).pick(QCursor.pos())
         if data is None or data is False:
             return False
@@ -1892,8 +1464,8 @@ class MainWindow(QMainWindow):
             name.setFocus()
             if not dlg.exec() or not name.text().strip():
                 return False
-            if keep.isChecked() and {"name": name.text().strip(), "rgb": list(btn.rgb)} not in self.presets:
-                self.add_preset(name.text().strip(), btn.rgb)
+            if keep.isChecked() and {"name": name.text().strip(), "rgb": list(btn.rgb)} not in self.presets.presets:
+                self.presets.add(name.text().strip(), btn.rgb)
             return name.text().strip(), btn.rgb
         return data[0], tuple(data[1])
 
