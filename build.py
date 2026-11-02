@@ -35,7 +35,7 @@ def main():
         "--collect-all", "truststore",
         "--copy-metadata", "keyring",
         "--exclude-module", "tkinter",
-        "--osx-bundle-identifier", "io.github.aejinyoo.psd-paint",
+        "--osx-bundle-identifier", "io.github.sugaringsoiii.psd-paint",
     ]
     PyInstaller.__main__.run(args)
     dist = ROOT / "dist"

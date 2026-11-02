@@ -12,7 +12,7 @@
 ## 1. 다운로드와 설치
 
 ### 설치 파일 (추천)
-[Releases](https://github.com/aejinyoo/psd-paint/releases) 에서 최신 버전을 받습니다.
+[Releases](https://github.com/sugaringsoiii/psd-paint/releases) 에서 최신 버전을 받습니다.
 
 | 컴퓨터 | 받을 파일 | 설치 |
 |---|---|---|
@@ -30,7 +30,7 @@ Intel Mac용 설치 파일은 없습니다. Intel Mac에서는 아래 '소스로
 Python 3.11 이상과 Git이 필요합니다.
 
 ```bash
-git clone https://github.com/aejinyoo/psd-paint.git ~/psd-paint
+git clone https://github.com/sugaringsoiii/psd-paint.git ~/psd-paint
 ```
 
 ```bash
