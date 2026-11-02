@@ -41,19 +41,30 @@ PART_OF_WORD = {w: part for part, words in PART_ALIASES.items() for w in words}
 PART_CODES = {"머리카락": (255, 0, 0), "피부": (255, 255, 0), "머리띠·모자": (255, 0, 255), "겉옷": (0, 0, 255),
               "상의": (0, 255, 255), "셔츠": (0, 255, 0), "넥타이·리본": (128, 0, 255), "하의": (139, 69, 19),
               "신발": (64, 64, 64), "사물": (255, 128, 0), "배경": (255, 255, 255)}
+PART_NAMES = list(PART_CODES)
+BODY = [p for p in PART_NAMES if p not in ("사물", "배경")]
 PERSON_CODES = {"A": (255, 0, 0), "B": (0, 0, 255), "C": (0, 200, 0), "D": (255, 160, 0), "배경": (255, 255, 255)}
-KEEP = ("Keep every black line exactly where it is; do not redraw, move, add or remove lines, do not change the "
-        "composition or size. Flat solid fills only (no shading, gradients or texture). Output only the image.")
-PARTS_PROMPT = """This is black-and-white manga line art. Make a flat color-coded part map of it.
+KEEP = ("Keep every black line exactly where it is; do not redraw, move, add or remove lines, and never draw new hands, "
+        "people or objects. Do not change the composition or size. Flat solid fills only (no shading, gradients or "
+        "texture). Output only the image.")
+PARTS_PROMPT = """This is one panel of black-and-white manga line art. Make a flat color-coded part map of it.
 Fill each closed area between the lines with ONE color by what it is:
-hair #FF0000, skin (face, forehead, ears, neck, hands, arms) #FFFF00, headband/hat #FF00FF,
+hair #FF0000, skin (face, forehead, ears, neck, hands, fingers, arms) #FFFF00, headband/hat #FF00FF,
 jacket/blazer/coat incl. lapels and sleeves #0000FF, sweater/vest/knit top #00FFFF, shirt (collar, cuffs, shirt front) #00FF00,
-necktie/ribbon #8000FF, pants/skirt #8B4513, shoes #404040, objects (cups, furniture, props) #FF8000, background: pure white.
-Parts of the same garment separated by folds or by something in front get the same color. """ + KEEP
-PERSONS_PROMPT = """This is black-and-white manga line art. Make a flat color map of the people in it.
+necktie/ribbon #8000FF, pants/skirt #8B4513, shoes #404040, objects (cups, phones, bags, furniture, props) #FF8000,
+background: pure white.
+Rules:
+- A hand holding an object: the hand and fingers are skin, only the object is orange.
+- Every area inside a person's silhouette gets a body color: small gaps between hair strands are hair, gaps between fingers that show the face are skin.
+- Background seen between body parts (outside the silhouette) stays white.
+- Parts of the same garment separated by folds or by something in front get the same color.
+""" + KEEP
+PERSONS_PROMPT = """This is one panel of black-and-white manga line art. Make a flat color map of the people in it.
 Give each distinct person one color, from left to right: first person #FF0000, second #0000FF, third #00C800, fourth #FFA000.
-Everything that belongs to a person (hair, skin, clothes, accessories, a hand reaching in) gets that person's color.
-Objects that nobody wears and the background stay pure white. """ + KEEP
+Fill the person's whole silhouette with that color: hair, face, skin, every piece of clothing and accessories,
+and a hand or arm of that person reaching in from the panel edge. Do not leave gaps inside the silhouette.
+Objects that nobody wears and the background stay pure white.
+""" + KEEP
 RATIOS = {"1:1": 1, "2:3": 2 / 3, "3:2": 3 / 2, "3:4": 3 / 4, "4:3": 4 / 3, "4:5": 4 / 5, "5:4": 5 / 4,
           "9:16": 9 / 16, "16:9": 16 / 9, "21:9": 21 / 9}
 
@@ -105,19 +116,26 @@ def from_app_settings():
     return from_presets(presets, parse_looks(s.value("character_looks", "")))
 
 
-def page_chunks(kmap):
-    """칠할 영역이 있는 부분을 세로 조각(컷 사이 여백에서 자름)으로 나눈다. → [(y0, y1, x0, x1)]"""
-    h, w = kmap.shape
-    busy = (kmap > 0).sum(1)
-    ys = np.nonzero(busy)[0]
-    if not ys.size:
-        return []
-    top, bottom = int(ys.min()), int(ys.max()) + 1
-    out = []
-    for a, b in match._chunks(bottom - top, busy[top:bottom]):
-        y0, y1 = top + a, top + b
-        cols = np.nonzero((kmap[y0:y1] > 0).any(0))[0]
-        if cols.size:
+def page_chunks(content, gap=16):
+    """컷 단위 조각: 내용(칠할 영역·컷 테두리)이 있는 줄이 gap 줄 이상 비어 끊기는 곳에서 나눈다.
+
+    컷을 중간에서 자르면 이미지 모델이 잘린 손을 지어내 그리므로 길어도 자르지 않는다 (보낼 때 줄어든다).
+    → [(y0, y1, x0, x1)]
+    """
+    h, w = content.shape
+    rows = content.any(1)
+    out, y = [], 0
+    while y < h:
+        if not rows[y]:
+            y += 1
+            continue
+        y0, empty = y, 0
+        while y < h and empty < gap:
+            empty = 0 if rows[y] else empty + 1
+            y += 1
+        y1 = y - empty
+        cols = np.nonzero(content[y0:y1].any(0))[0]
+        if cols.size and y1 - y0 >= 40:
             out.append((y0, y1, max(0, int(cols.min()) - match.MARGIN), min(w, int(cols.max()) + 1 + match.MARGIN)))
     return out
 
@@ -154,37 +172,32 @@ def generate(lines, prompt, api_key, model):
     raise RuntimeError(f"이미지 모델이 그림을 돌려주지 않았습니다 (finishReason: {cand.get('finishReason')})")
 
 
-def _votes(img, codes, kmap, n_codes_out):
-    """칠한 그림의 색을 코드에 맞추고 영역마다 코드별 픽셀 수를 센다. → (영역 수+1, 코드 수) 배열"""
+def _codes(img, codes):
+    """칠한 그림의 픽셀마다 가장 가까운 코드 번호. 선(검정)은 -1."""
     cols = np.array(list(codes.values()), int)
-    lab = ((img.astype(int)[:, :, None, :] - cols[None, None]) ** 2).sum(3).argmin(2)
-    ok = (img.astype(int).sum(2) >= 200) & (kmap > 0)  # 선(검정)은 세지 않는다
-    counts = np.zeros((n_codes_out, len(cols)), np.int64)
-    np.add.at(counts, (kmap[ok], lab[ok]), 1)
-    return counts
+    img = img.astype(int)
+    lab = ((img[:, :, None, :] - cols[None, None]) ** 2).sum(3).argmin(2)
+    lab[img.sum(2) < 200] = -1
+    return lab
 
 
-def image_maps(labels, boundary, cand, api_key, model, folder, say=lambda msg: None):
-    """컷마다 부위·사람 지도를 만들고(또는 저장해 둔 것을 읽고) 영역마다 다수결한다.
+def image_maps(labels, boundary, content, api_key, model, folder, say=lambda msg: None):
+    """컷마다 부위 지도 2장·사람 지도 1장을 만들고(또는 저장해 둔 것을 읽고) 페이지 크기 픽셀 지도로 모은다.
 
-    → part_of {영역: 부위}, person_of {영역: 사람 id}, crops [(사람 id, 잘라 낸 선화)], 사용량
+    content: 컷을 나눌 때 볼 내용 (배경 아닌 영역 + 컷 테두리). 페이지 바깥 여백은 넣지 않는다.
+    → part_px (부위 번호, 모르면 -1), person_px (사람 번호, 없으면 -1), 사람 id 목록, 컷 목록, 사용량
     """
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
-    n = int(labels.max())
-    lut = np.zeros(n + 1, np.int32)
-    lut[cand] = cand
-    kmap = lut[labels]  # 후보 영역만 남긴 영역 번호
     lines = np.full(labels.shape + (3,), 255, np.uint8)
     lines[boundary] = 0
-    chunks = page_chunks(kmap)
+    chunks = page_chunks(content)
     usage = {"input": 0, "output": 0, "calls": 0, "model": model}
     jobs = []
     for i, (y0, y1, x0, x1) in enumerate(chunks, 1):
         im = Image.fromarray(lines[y0:y1, x0:x1])
-        for kind, prompt in (("parts", PARTS_PROMPT), ("persons", PERSONS_PROMPT)):
-            path = folder / f"{kind}_{i}.png"
-            jobs.append((path, im, prompt))
+        jobs += [(folder / f"parts_{i}.png", im, PARTS_PROMPT), (folder / f"parts_{i}b.png", im, PARTS_PROMPT),
+                 (folder / f"persons_{i}.png", im, PERSONS_PROMPT)]
     todo = [j for j in jobs if not j[0].exists()]
     if todo:
         if not api_key:
@@ -202,47 +215,155 @@ def image_maps(labels, boundary, cand, api_key, model, folder, say=lambda msg: N
                 usage["input"] += u["input"]
                 usage["output"] += u["output"]
                 usage["calls"] += 1
-    part_votes = np.zeros((n + 1, len(PART_CODES)), np.int64)
-    person_of, crops = {}, []
+    h, w = labels.shape
+    part_px = np.full((h, w), -1, np.int16)
+    person_px = np.full((h, w), -1, np.int16)
+    person_ids = []
     for i, (y0, y1, x0, x1) in enumerate(chunks, 1):
-        km = kmap[y0:y1, x0:x1]
-        part_votes += _votes(np.asarray(Image.open(folder / f"parts_{i}.png").convert("RGB")), PART_CODES, km, n + 1)
-        pv = _votes(np.asarray(Image.open(folder / f"persons_{i}.png").convert("RGB")), PERSON_CODES, km, n + 1)
-        regs = [int(r) for r in np.unique(km) if r and pv[r].sum() >= 20]
+        load = lambda name: np.asarray(Image.open(folder / name).convert("RGB"))
+        a, b = _codes(load(f"parts_{i}.png"), PART_CODES), _codes(load(f"parts_{i}b.png"), PART_CODES)
+        # 두 장이 같은 픽셀만 믿는다 (돌릴 때마다 흔들리는 곳은 모름으로 두고 둘레를 따른다)
+        part_px[y0:y1, x0:x1] = np.where(a == b, a, -1)
+        q = _codes(load(f"persons_{i}.png"), PERSON_CODES)
         names = list(PERSON_CODES)
-        local = {r: names[int(pv[r].argmax())] for r in regs}
-        # 조각 안의 사람: 사람 지도에서 빠졌지만 부위 지도로는 몸인 영역은 가장 가까운 사람에게 붙인다
-        people = sorted({v for v in local.values() if v != "배경"})
-        if people:
-            dists = np.stack([ndimage.distance_transform_edt(~np.isin(km, [r for r, v in local.items() if v == p]))
-                              for p in people])
-            for r in regs:
-                part = list(PART_CODES)[int(part_votes[r].argmax())]
-                if local[r] == "배경" and part not in ("배경", "사물"):
-                    ys, xs = np.nonzero(km == r)
-                    local[r] = people[int(dists[:, ys, xs].mean(1).argmin())]
-        for r, p in local.items():
-            if p != "배경" and r not in person_of:  # 조각 둘에 걸친 영역은 먼저 본 조각을 따른다
-                person_of[r] = f"{i}{p}"
-        # 사람마다 잘라 낸 선화 (다른 사람·배경 선은 흐리게) — 누구인지 알아보는 데 쓴다
-        bnd = boundary[y0:y1, x0:x1]
-        for p in people:
-            m = np.isin(km, [r for r, v in local.items() if v == p])
-            if m.sum() < 2000:
+        local = np.full(q.shape, -1, np.int16)
+        for j, letter in enumerate(names[:-1]):
+            if (q == j).sum() >= 200:
+                person_ids.append(f"{i}{letter}")
+                local[q == j] = len(person_ids) - 1
+        person_px[y0:y1, x0:x1] = local
+    # 이미지 모델이 컷 테두리·배경에 사람 색을 칠하기도 한다. 몸(머리카락·피부·옷)이 거의 없는 '사람'은 버린다.
+    # 손·팔만 나온 사람도 있으므로 머리는 따지지 않는다
+    body = np.isin(part_px, [PART_NAMES.index(p) for p in BODY])
+    for j in range(len(person_ids)):
+        m = person_px == j
+        if (body & m).sum() < max(800, 0.4 * m.sum()):
+            person_px[m] = -1
+    return part_px, person_px, person_ids, chunks, usage
+
+
+def _counts(labels, px, k, n):
+    """영역마다 값별 픽셀 수. → (n+1, k)"""
+    ok = (px >= 0) & (labels > 0)
+    out = np.zeros((n + 1, k), np.int64)
+    np.add.at(out, (labels[ok], px[ok]), 1)
+    return out
+
+
+def split_mixed(labels, part_px, cand, min_px=300, share=0.15):
+    """선이 끊겨 한 영역에 부위 둘(배경과 몸, 머리카락과 피부 …)이 섞이면 생성 지도의 경계대로 나눈다.
+
+    labels를 고쳐 새 영역 번호를 붙인다. → 새 영역 수
+    """
+    n = int(labels.max())
+    cnt = _counts(labels, part_px, len(PART_NAMES), n)
+    boxes = ndimage.find_objects(labels)
+    for r in cand:
+        c = cnt[r]
+        tot = c.sum()
+        if tot < 2 * min_px:
+            continue
+        top, second = np.argsort(-c)[:2]
+        if c[second] < max(min_px, share * tot):
+            continue
+        sl = boxes[r - 1]
+        m = labels[sl] == r
+        lab = np.where(m, part_px[sl], -1)
+        known = lab >= 0
+        # 모르는 픽셀은 가장 가까운 아는 픽셀의 부위를 따른다
+        idx = ndimage.distance_transform_edt(~known, return_indices=True)[1]
+        full = lab[idx[0], idx[1]]
+        for v in np.unique(full[m]):
+            if v == top:
                 continue
-            ys, xs = np.nonzero(m)
-            pad = 40
-            a0, a1 = max(0, ys.min() - pad), min(m.shape[0], ys.max() + pad)
-            b0, b1 = max(0, xs.min() - pad), min(m.shape[1], xs.max() + pad)
-            rgb = np.full(m.shape + (3,), 255, np.uint8)
-            rgb[bnd] = 190
-            rgb[bnd & ndimage.binary_dilation(m, iterations=3)] = 0
-            im = Image.fromarray(rgb[a0:a1, b0:b1])
-            im.thumbnail((800, 800), Image.LANCZOS)
-            crops.append((f"{i}{p}", im))
-    names = list(PART_CODES)
-    part_of = {int(r): names[int(part_votes[r].argmax())] for r in cand if part_votes[r].sum() >= 20}
-    return part_of, person_of, crops, usage
+            comp, k = ndimage.label(m & (full == v))
+            for j in range(1, k + 1):
+                piece = comp == j
+                if piece.sum() >= min_px // 2:
+                    n += 1
+                    labels[sl][piece] = n
+    return n
+
+
+def decide(labels, n, part_px, person_px, person_ids, bg_hint):
+    """영역마다 부위·사람을 정한다.
+
+    - 사람 실루엣 안(사람 지도에 칠해진 픽셀이 절반 이상)은 빈틈없이 칠한다. 부위를 모르면 둘레를 따른다.
+    - 실루엣 밖이고 지도가 배경이라고 한 영역만 비운다.
+    → part_of {영역: 부위}, person_of {영역: 사람 id}, background (n+1 bool)
+    """
+    pc = _counts(labels, part_px, len(PART_NAMES), n)
+    qc = _counts(labels, person_px, max(1, len(person_ids)), n)
+    areas = np.bincount(labels.ravel(), minlength=n + 1)
+    seen = np.bincount(labels[(part_px >= 0) | (person_px >= 0)].ravel(), minlength=n + 1)
+    inside = qc.sum(1) >= 0.5 * np.maximum(areas, 1)
+    bg_i, obj_i = PART_NAMES.index("배경"), PART_NAMES.index("사물")
+    body_idx = [PART_NAMES.index(p) for p in BODY]
+    part_of, person_of = {}, {}
+    background = np.zeros(n + 1, bool)
+    for r in range(1, n + 1):
+        if not areas[r]:
+            continue
+        c = pc[r]
+        if not inside[r]:
+            if seen[r] < 10:
+                background[r] = bool(bg_hint[r])  # 지도에 거의 안 걸린 영역은 원래 배경 판단을 따른다
+                continue
+            if c[bg_i] >= c.sum() * 0.5 or c.sum() == 0:
+                background[r] = True
+                continue
+            if c[obj_i] >= c[body_idx].sum():
+                part_of[r] = "사물"
+                continue
+        body = c[body_idx]
+        if body.sum():
+            part_of[r] = BODY[int(body.argmax())]
+        if qc[r].sum():
+            person_of[r] = person_ids[int(qc[r].argmax())]
+    return part_of, person_of, background
+
+
+def spread(labels, region_key, todo, passes=6):
+    """정하지 못한 영역은 둘레에 가장 많이 닿은 칠한 영역을 따른다 (실루엣 안 빈틈 메우기)."""
+    boxes = ndimage.find_objects(labels)
+    todo = [r for r in todo if boxes[r - 1] is not None]
+    for _ in range(passes):
+        left = []
+        for r in todo:
+            sl = tuple(slice(max(s.start - 6, 0), s.stop + 6) for s in boxes[r - 1])
+            mine = labels[sl] == r
+            ring = ndimage.binary_dilation(mine, iterations=6) & ~mine
+            neigh = labels[sl][ring]
+            neigh = neigh[(neigh > 0) & (region_key[neigh] >= 0)]
+            if neigh.size:
+                region_key[r] = region_key[np.bincount(neigh).argmax()]
+            else:
+                left.append(r)
+        if len(left) == len(todo):
+            break
+        todo = left
+
+
+def person_crops(labels, boundary, person_px, person_ids, chunks):
+    """사람마다 잘라 낸 선화 (다른 사람·배경 선은 흐리게) — 누구인지 알아보는 데 쓴다."""
+    crops = []
+    for j, pid in enumerate(person_ids):
+        m = person_px == j
+        if m.sum() < 2000:
+            continue
+        ys, xs = np.nonzero(m)
+        pad = 40
+        y0, y1 = max(0, ys.min() - pad), min(m.shape[0], ys.max() + pad)
+        x0, x1 = max(0, xs.min() - pad), min(m.shape[1], xs.max() + pad)
+        sub = m[y0:y1, x0:x1]
+        bnd = boundary[y0:y1, x0:x1]
+        rgb = np.full(sub.shape + (3,), 255, np.uint8)
+        rgb[bnd] = 190
+        rgb[bnd & ndimage.binary_dilation(sub, iterations=4)] = 0
+        im = Image.fromarray(rgb)
+        im.thumbnail((800, 800), Image.LANCZOS)
+        crops.append((pid, im))
+    return crops
 
 
 def identify_job(crops, chars):
@@ -273,9 +394,10 @@ def save_identify(job, crops, folder):
         "저장한 뒤 psd-paint에서 같은 파일을 다시 실행하면 답을 적용한다.\n")
 
 
-def assign(part_of, person_of, who, chars, n):
+def assign(part_of, person_of, who, chars, n, labels, background):
     """부위·사람·캐릭터 → 영역별 키. 레이어는 부위마다 하나, 색은 캐릭터마다 다르다.
 
+    부위를 정하지 못한 배경 아닌 영역은 둘레를 따른다.
     → region_key (영역 수+1), keys [(레이어, rgb)], 레이어 이름 순서
     """
     color_of = {c["name"]: c["colors"] for c in chars}
@@ -283,8 +405,6 @@ def assign(part_of, person_of, who, chars, n):
     keys = []
     extras = sorted({p for p in person_of.values() if who.get(p, "모름") not in color_of})
     for r, part in part_of.items():
-        if part == "배경":
-            continue
         if part == "사물":
             key = ("사물", (215, 215, 215))
         else:
@@ -302,6 +422,8 @@ def assign(part_of, person_of, who, chars, n):
         if key not in keys:
             keys.append(key)
         region_key[r] = keys.index(key)
+    areas = np.bincount(labels.ravel(), minlength=n + 1)
+    spread(labels, region_key, [r for r in range(1, n + 1) if areas[r] and region_key[r] < 0 and not background[r]])
     order = [match.LAYER_OF_PART.get(p, p) for p in match.PARTS] + ["사물"]
     names = sorted({k[0] for k in keys}, key=lambda s: order.index(s) if s in order else len(order))
     return region_key, keys, names

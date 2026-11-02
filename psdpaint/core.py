@@ -632,7 +632,8 @@ def ai_match(mismatch, labels, n, boundary, frame, opts, out_path, say):
 def character_match(labels, n, boundary, frame, opts, out_path, say):
     """캐릭터 프리셋으로 칠한다: 이미지 모델이 부위·사람을 나누고, AI가 누구인지 고르고, 색은 프리셋에서.
 
-    → (영역별 키, 키 목록, 레이어 이름 순서, 사용량)
+    labels를 고칠 수 있다 (한 영역에 부위가 섞이면 나눈다).
+    → (영역별 키, 키 목록, 레이어 이름 순서, 사용량, 비워 둘 배경 영역)
     """
     from . import characters, match
 
@@ -641,17 +642,23 @@ def character_match(labels, n, boundary, frame, opts, out_path, say):
         raise PaintError("캐릭터 프리셋이 없습니다. 색상 프리셋에 '캐릭터/부위' 이름으로 색을 넣으세요 (예: 하늘/머리).")
     areas = np.bincount(labels.ravel(), minlength=n + 1)
     bg = find_background(labels, n, frame, np.full(n + 1, -1, np.int64), opts)
-    cand = np.nonzero((areas >= opts.small_area) & ~bg)[0]
+    cand = np.nonzero(areas >= opts.small_area)[0]  # 배경도 보낸다: 컷을 통째로 봐야 실루엣을 안다
     cand = cand[cand > 0]
     folder = Path(out_path).with_name(Path(out_path).stem + "_AI매칭")
     answer_file = folder / "answer.json"
     if folder.exists() and not (opts.ai_mode == "files" and answer_file.exists()):
         # 새로 묻는다: 전에 만든 지도·답은 지운다 (요청 폴더 방식에서 답을 받은 뒤 다시 실행할 때만 그대로 쓴다)
-        for old in [*folder.glob("parts_*.png"), *folder.glob("persons_*.png"), *folder.glob("person_*.png"), answer_file]:
+        for old in [*folder.glob("parts_*.png"), *folder.glob("persons_*.png"), *folder.glob("person_*.png"),
+                    answer_file]:
             old.unlink(missing_ok=True)
     try:
-        part_of, person_of, crops, usage = characters.image_maps(
-            labels, boundary, cand, opts.ai_image_key, opts.ai_image_model, folder, lambda msg: say(msg, 0.4))
+        part_px, person_px, person_ids, chunks, usage = characters.image_maps(
+            labels, boundary, np.isin(labels, cand[~bg[cand]]) | frame, opts.ai_image_key, opts.ai_image_model, folder,
+            lambda msg: say(msg, 0.4))
+        n = characters.split_mixed(labels, part_px, cand)
+        bg_hint = np.r_[bg, np.zeros(n + 1 - len(bg), bool)]
+        part_of, person_of, background = characters.decide(labels, n, part_px, person_px, person_ids, bg_hint)
+        crops = characters.person_crops(labels, boundary, person_px, person_ids, chunks)
         who = {}
         if crops and opts.ai_mode != "off":
             job = characters.identify_job(crops, chars)
@@ -674,8 +681,8 @@ def character_match(labels, n, boundary, frame, opts, out_path, say):
             who = {p["person"]: p["character"] for p in answer.get("people", [])}
     except RuntimeError as e:
         raise PaintError(f"캐릭터 매칭 실패: {e}") from None
-    region_key, keys, names = characters.assign(part_of, person_of, who, chars, n)
-    return region_key, keys, names, usage
+    region_key, keys, names = characters.assign(part_of, person_of, who, chars, n, labels, background)
+    return region_key, keys, names, usage, background
 
 
 def paint(psd_path, out_path, opts=None, progress=None):
@@ -691,8 +698,10 @@ def paint(psd_path, out_path, opts=None, progress=None):
     line_group, boundary, frame, labels, n = segment(psd, opts)
     say("참고 레이어 읽는 중", 0.3)
     ai_usage = {}
+    keep_empty = None  # 캐릭터 방식에서 비워 둘 배경 영역
     if opts.hint_source == "characters":
-        region_key, keys, names, ai_usage = character_match(labels, n, boundary, frame, opts, out_path, say)
+        region_key, keys, names, ai_usage, keep_empty = character_match(labels, n, boundary, frame, opts, out_path, say)
+        n = len(region_key) - 1
         image_mode = False
     else:
         try:
@@ -714,11 +723,15 @@ def paint(psd_path, out_path, opts=None, progress=None):
     if opts.auto_fill:
         say("힌트 없는 영역 자동 칠하는 중", 0.5)
         bg = find_background(labels, n, frame, region_key, opts)
+        if keep_empty is not None:
+            bg |= keep_empty
         auto = auto_color(labels, n, region_key, bg, keys, opts)
         if auto:
             names.append(opts.auto_layer)
     names[:] = list(dict.fromkeys(names))
     merge_small(labels, n, region_key, opts)
+    if keep_empty is not None:
+        region_key[keep_empty] = -1  # 작은 배경 조각이 둘레를 따라 칠해지지 않게
     areas = np.bincount(labels.ravel(), minlength=n + 1)
     unhinted_large = int(((region_key < 0) & (areas >= opts.small_area))[1:].sum())
     if not (region_key >= 0).any():
