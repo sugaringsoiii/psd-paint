@@ -20,8 +20,9 @@
 | Windows | `psd-paint-<버전>-windows.zip` | 압축을 풀고 `psd-paint` 폴더 안의 `psd-paint.exe`를 실행합니다 |
 
 **처음 실행할 때 경고가 뜨면** (개발자 서명이 없는 앱이라 뜹니다)
-- Mac: "확인되지 않은 개발자" → 응용 프로그램 폴더에서 `psd-paint`를 **우클릭 → 열기 → 열기**. 한 번만 하면 됩니다.
-  그래도 안 열리면 터미널에서 `xattr -dr com.apple.quarantine /Applications/psd-paint.app` 를 실행합니다.
+- Mac: "손상되었기 때문에 열 수 없습니다" → **취소**를 누르고, `psd-paint`를 응용 프로그램 폴더로 옮긴 뒤 터미널에서 아래 명령을 실행합니다. 한 번만 하면 됩니다.
+  `xattr -dr com.apple.quarantine /Applications/psd-paint.app`
+  "확인되지 않은 개발자"가 뜨는 macOS에서는 응용 프로그램 폴더에서 **우클릭 → 열기 → 열기**로도 열립니다.
 - Windows: "Windows의 PC 보호" → **추가 정보 → 실행**.
 
 Intel Mac용 설치 파일은 없습니다. Intel Mac에서는 아래 '소스로 설치'를 쓰세요.
@@ -180,7 +181,7 @@ Claude가 알아서 순서대로 진행합니다.
 | 증상 | 해결 |
 |---|---|
 | `CERTIFICATE_VERIFY_FAILED` | 최신 버전으로 업데이트하세요. OS 인증서 저장소를 씁니다 |
-| Mac에서 앱이 안 열림 | 우클릭 → 열기, 또는 `xattr -dr com.apple.quarantine /Applications/psd-paint.app` |
+| Mac에서 앱이 안 열림(손상됨) | `xattr -dr com.apple.quarantine /Applications/psd-paint.app` |
 | AI 매칭이 오래 걸림 | 이미지 여러 장을 보고 판단하느라 1~3분 걸릴 수 있습니다(제한 10분) |
 | 인물 색이 뒤바뀜·엑스트라가 회색 | 레퍼런스에 그 인물이 나와야 색을 맞춥니다. 캐릭터 시트를 레퍼런스로 쓰거나 `참고` 폴더에 점을 찍어 보완하세요. 결과 폴더(`…_AI매칭/answer.json`)를 고쳐 '요청 폴더' 방식으로 다시 실행해도 됩니다 |
 | MCP 도구가 안 보임 | 설정 파일 경로·JSON 문법을 확인하고 Claude 데스크톱을 완전히 종료 후 다시 여세요 |
