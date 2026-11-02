@@ -118,8 +118,9 @@ def register(client):
 def prompt_for(files):
     """칠할 파일 목록을 넣은 요청 글."""
     lines = "\n".join(f"- {f}" for f in files)
-    return ("psd-paint로 아래 PSD를 캐릭터 프리셋으로 밑색 칠해 줘. 파일마다 psd-paint의 paint_characters(psd_path=…)를 부르고, "
-            "돌려준 등장인물 그림과 영역 확인 칸을 보고 칸마다 부위·누구인지 apply_characters로 답해 줘.\n" + lines)
+    return ("psd-paint로 아래 PSD를 캐릭터 프리셋으로 밑색 칠해 줘. 파일마다 psd-paint의 paint_characters(psd_path=…)를 부르면 "
+            "영역 확인 판이 한 장씩 와. 판마다 칸을 하나씩 둘레의 얼굴·머리띠·옷깃까지 보고 부위·누구인지 apply_characters로 답하고, "
+            "다음 판이 오면 끝까지 이어서 답해 줘. 서두르지 말고 칸마다 꼼꼼히 봐 줘.\n" + lines)
 
 
 def launch(client, prompt, folder=None):

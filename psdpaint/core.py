@@ -738,6 +738,8 @@ def _tiles_match(labels, n, boundary, frame, cand, chars, opts, folder, say):
     answer, usage = _ask_or_wait(job, lambda: characters.save_tiles(job, profiles, regions, folder), opts, folder,
                                  say, "영역 확인")
     part_of, person_of, who, background = characters.from_tiles(answer, regions, n)
+    # 한 사람 몸 안에서 몇 칸만 다른 이름으로 답한 실수를 이웃 다수로 바로잡는다
+    characters.smooth_people(labels, person_of, part_of, adjacency(labels))
     background[list(auto_bg)] = True
     return part_of, person_of, who, background, usage, n
 

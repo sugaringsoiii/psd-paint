@@ -730,3 +730,53 @@ def import_bundle(path):
     presets = [{"name": p["name"], "rgb": [int(v) for v in p["rgb"]]} for p in data.get("presets", [])
                if isinstance(p.get("name"), str)]
     return presets, profiles
+
+
+def smooth_people(labels, person_of, part_of, pairs, share=0.8, ratio=0.2):
+    """칸 답에서 '누구인지'를 바로잡는다. 한 사람 몸 안에 다른 이름으로 답한 조각(뭉치)이 박혀 있으면 둘레 사람으로 바꾼다.
+
+    맞닿은 같은 이름 영역끼리 뭉치로 묶고, 뭉치의 바깥 이웃(몸 영역, 모름 제외) 가운데 share 이상이 한 사람이며
+    그 사람 쪽 이웃 뭉치 넓이에 비해 ratio보다 작은 뭉치만 바꾼다.
+    두 사람이 맞닿은 경계(각자 큰 몸)는 건드리지 않고, 몸 안에 박힌 작은 실수만 고친다. → 바꾼 영역 수
+    """
+    areas = np.bincount(labels.ravel(), minlength=int(labels.max()) + 1)
+    neigh = {}
+    for a, b in pairs:
+        a, b = int(a), int(b)
+        if a in person_of and b in person_of:
+            neigh.setdefault(a, set()).add(b)
+            neigh.setdefault(b, set()).add(a)
+    # 같은 이름으로 이어진 뭉치
+    group, groups = {}, []
+    for r in person_of:
+        if r in group:
+            continue
+        gid, stack, members = len(groups), [r], []
+        group[r] = gid
+        while stack:
+            x = stack.pop()
+            members.append(x)
+            for o in neigh.get(x, ()):
+                if o not in group and person_of[o] == person_of[r]:
+                    group[o] = gid
+                    stack.append(o)
+        groups.append(members)
+    size = [sum(int(areas[m]) for m in g) for g in groups]
+    changed = 0
+    for gid, members in enumerate(groups):
+        me = person_of[members[0]]
+        if me == "모름":
+            continue
+        outside = {o for m in members for o in neigh.get(m, ()) if group[o] != gid and person_of[o] != "모름"}
+        if not outside:
+            continue
+        names = [person_of[o] for o in outside]
+        best = max(set(names), key=names.count)
+        if names.count(best) < share * len(names):
+            continue
+        support = sum(size[g] for g in {group[o] for o in outside if person_of[o] == best})
+        if size[gid] < ratio * support:
+            for m in members:
+                person_of[m] = best
+            changed += len(members)
+    return changed

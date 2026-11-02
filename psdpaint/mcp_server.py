@@ -41,6 +41,35 @@ def _png(im, width=480):
     return Image(data=buf.getvalue(), format="png")
 
 
+def _partial(folder):
+    """판마다 받은 칸 답 (전부 모이기 전)."""
+    try:
+        return {int(it["tile"]): it for it in json.loads((folder / "partial.json").read_text())}
+    except (OSError, ValueError):
+        return {}
+
+
+def _tile_sheet(folder, got):
+    """아직 답하지 않은 칸이 든 판 한 장을 돌려준다. 판을 한 장씩 보고 답하게 해서 칸이 많아도 흐트러지지 않게 한다."""
+    from .characters import TILE_COLS, TILE_ROWS
+
+    info = json.loads((folder / "tiles.json").read_text())
+    count, per = len(info["regions"]), TILE_COLS * TILE_ROWS
+    todo = next((i for i in range(1, info["sheets"] + 1)
+                 if any(t not in got for t in range((i - 1) * per + 1, min(i * per, count) + 1))), 1)
+    first, last = (todo - 1) * per + 1, min(todo * per, count)
+    readme = (folder / "README.md").read_text()
+    prompt = readme.split("\n\n", 2)[2].split("답은 schema.json")[0].strip()
+    prompt = prompt.replace(f"칸 번호 1 ~ {count}를 모두 적는다.", f"이번 판의 칸 번호 {first} ~ {last}를 모두 적는다.")
+    out = [f"영역 확인 판 {todo}/{info['sheets']} (칸 {first}~{last}, 전체 {count}칸 중 {len(got)}칸 답함). 작업: {folder}\n"
+           f"이 판의 칸 {first}~{last}만 보고 칸마다 부위·누구인지 적어 apply_characters(job=위 경로, items=[…])를 호출하세요. "
+           "다음 판은 답하면 이어서 드립니다. 칸을 하나씩 둘레의 얼굴·머리띠·옷깃까지 확인하고, 같은 사람은 판이 바뀌어도 같은 이름으로 적으세요.\n"]
+    for i, name in enumerate(info["profiles"], 1):
+        out += [f"[등장인물 {name}]", Image(path=folder / f"profile_{i}.png")]
+    out += [f"[영역 확인 {todo}]", Image(path=folder / f"tiles_{todo}.png"), prompt]
+    return out
+
+
 def _summary(result):
     lines = [f"저장: {result.out_path}", f"밑색 레이어: {', '.join(result.layers)}"]
     if result.auto:
@@ -70,17 +99,7 @@ def _run(psd_path, out_path, opts):
             {"psd_path": str(psd_path), "out_path": str(out_path), "options": options}, ensure_ascii=False))
         readme = (folder / "README.md").read_text()
         if (folder / "tiles.json").exists():
-            info = json.loads((folder / "tiles.json").read_text())
-            prompt = readme.split("\n\n", 2)[2].split("답은 schema.json")[0].strip()
-            out = [f"영역 확인이 필요합니다. 작업: {folder} (칸 {len(info['regions'])}개)\n"
-                   "등장인물 대표 그림과 영역 확인 칸을 보고, 칸마다 부위·누구인지 적어 "
-                   "apply_characters(job=위 경로, items=[{\"tile\", \"part\", \"character\"}, …]) 를 호출하세요.\n"]
-            for i, name in enumerate(info["profiles"], 1):
-                out += [f"[등장인물 {name}]", Image(path=folder / f"profile_{i}.png")]
-            for i in range(1, info["sheets"] + 1):
-                out += [f"[영역 확인 {i}]", Image(path=folder / f"tiles_{i}.png")]
-            out.append(prompt)
-            return out
+            return _tile_sheet(folder, {})
         if (folder / "characters.json").exists():
             prompt = readme.split("\n\n", 2)[2].split("답은 schema.json")[0].strip()
             out = [f"인물이 누구인지 알아봐야 합니다. 작업: {folder}\n"
@@ -169,7 +188,8 @@ def paint_psd(psd_path: str, reference: str = "", output_dir: str = "", line_gro
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if characters:
         # 새로 칠하기다: 전에 이 파일을 칠할 때 남은 답은 쓰지 않는다 (답은 apply_characters로만 받는다)
-        (_job_folder(out_path) / "answer.json").unlink(missing_ok=True)
+        for name in ("answer.json", "partial.json"):
+            (_job_folder(out_path) / name).unlink(missing_ok=True)
     return _run(psd_path, out_path, opts)
 
 
@@ -206,7 +226,8 @@ def apply_match(job: str, people: list[dict] | None = None, objects: list[dict] 
 def paint_characters(psd_path: str, output_dir: str = "", overwrite: bool = False, parts: str = ""):
     """psd-paint 앱에 등록한 캐릭터(대표 그림·생김새·'캐릭터/부위' 색)로 인물 밑색을 칠한다.
 
-    등장인물 대표 그림과 영역 확인 칸을 돌려주니, 칸마다 부위·누구인지 적어 apply_characters(job, items=[…])를 호출한다.
+    등장인물 대표 그림과 영역 확인 판(칸 20개)을 한 장씩 돌려주니, 그 판의 칸마다 부위·누구인지 적어
+    apply_characters(job, items=[…])를 호출한다. 다음 판이 오면 같은 방식으로 이어서 답한다.
     결과는 원본이름_밑색.psd (overwrite면 원본)에 저장한다. paint_psd(characters=true)와 같다.
     """
     return paint_psd(psd_path, output_dir=output_dir, overwrite=overwrite, characters=True, parts=parts)
@@ -218,12 +239,23 @@ def apply_characters(job: str, items: list[dict] | None = None, people: list[dic
 
     - job: paint_psd가 알려 준 작업 폴더 경로
     - items: 영역 확인 칸의 답. [{"tile": 칸 번호, "part": 부위·사물·배경, "character": 등장인물 이름·모름·없음}]
-      모든 칸을 적는다. 고칠 때는 바꿀 칸만 다시 보내도 된다 (전 답에 덮어쓴다).
+      판을 한 장씩 받는다: 받은 판의 칸만 답하면 다음 판을 돌려주고, 모든 칸이 모이면 칠한다.
+      칠한 뒤 고칠 때는 바꿀 칸만 다시 보내도 된다 (전 답에 덮어쓴다).
     - people: 이미지 지도 방식의 인물 답. [{"person": "1A", "character": 등장인물 이름 또는 "모름", "reason": 짧은 근거}]
     """
     folder = Path(job)
     info = json.loads((folder / "job.json").read_text())
     answer_file = folder / "answer.json"
+    if items is not None and not answer_file.exists() and (folder / "tiles.json").exists():
+        # 판마다 받는 중: 모든 칸이 모이면 칠하고, 아니면 다음 판을 준다
+        got = _partial(folder)
+        got.update({int(it["tile"]): it for it in items})
+        count = len(json.loads((folder / "tiles.json").read_text())["regions"])
+        if any(t not in got for t in range(1, count + 1)):
+            (folder / "partial.json").write_text(json.dumps([got[k] for k in sorted(got)], ensure_ascii=False))
+            return _tile_sheet(folder, got)
+        items = list(got.values())
+        (folder / "partial.json").unlink(missing_ok=True)
     if items is not None:
         old = json.loads(answer_file.read_text()).get("items", []) if answer_file.exists() else []
         merged = {int(it["tile"]): it for it in old}
