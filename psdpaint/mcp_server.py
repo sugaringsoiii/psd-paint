@@ -317,6 +317,13 @@ def apply_characters(job: str, items: list[dict] | None = None, people: list[dic
             return _tile_sheet(folder, got)
         items = list(got.values())
         (folder / "partial.json").unlink(missing_ok=True)
+    if items is not None and answer_file.exists():
+        # 칠한 뒤 고친 칸: 무엇을 무엇으로 고쳤는지 센다 (개선 제안에 쓴다)
+        from .characters import record_fixes
+        before = {int(it["tile"]): it for it in json.loads(answer_file.read_text()).get("items", [])}
+        record_fixes([(before[int(it["tile"])]["part"], it["part"],
+                       before[int(it["tile"])].get("character") != it.get("character"))
+                      for it in items if int(it["tile"]) in before], "AI 검수")
     if items is not None:
         old = json.loads(answer_file.read_text()).get("items", []) if answer_file.exists() else []
         merged = {int(it["tile"]): it for it in old}

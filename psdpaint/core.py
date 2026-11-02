@@ -823,7 +823,7 @@ def split_leaks(labels, boundary, opts, line=None, background=None):
     return n
 
 
-def _tiles_match(labels, n, boundary, frame, cand, chars, opts, folder, say):
+def _tiles_match(labels, n, boundary, frame, cand, chars, opts, folder, say, psd_path=None):
     """영역 확인 칸: 글 AI가 영역마다 부위·누구인지 답한다 (그림 모델 없이)."""
     from . import characters
 
@@ -837,7 +837,7 @@ def _tiles_match(labels, n, boundary, frame, cand, chars, opts, folder, say):
     regions = characters.tile_regions(labels, [r for r in cand if r not in auto_bg])
     say(f"영역 확인 칸 만드는 중 ({len(regions)}곳)", 0.4)
     sheets = characters.region_sheets(labels, boundary, regions)
-    job, profiles = characters.tiles_job(sheets, chars, len(regions))
+    job, profiles = characters.tiles_job(sheets, chars, len(regions), psd_path)
     answer, usage = _ask_or_wait(job, lambda: characters.save_tiles(job, profiles, regions, folder), opts, folder,
                                  say, "영역 확인")
     part_of, person_of, who, background = characters.from_tiles(answer, regions, n)
@@ -882,7 +882,7 @@ def _answer_fits(folder, parts):
     return (folder / "characters.json").exists() and isinstance(answer.get("people"), list)
 
 
-def character_match(labels, n, boundary, frame, opts, out_path, say):
+def character_match(labels, n, boundary, frame, opts, out_path, say, psd_path=None):
     """캐릭터 프리셋으로 칠한다: 부위·누구인지는 AI가 정하고(opts.ai_parts), 색은 프리셋에서 가져온다.
 
     labels를 고칠 수 있다 (이미지 지도 방식에서 한 영역에 부위가 섞이면 나눈다).
@@ -913,7 +913,7 @@ def character_match(labels, n, boundary, frame, opts, out_path, say):
     try:
         if opts.ai_parts == "tiles":
             part_of, person_of, who, background, usage, n = _tiles_match(labels, n, boundary, frame, cand, chars,
-                                                                          opts, folder, say)
+                                                                          opts, folder, say, psd_path)
         else:
             part_of, person_of, who, background, usage, n = _image_match(labels, boundary, frame, cand, bg, chars,
                                                                            opts, folder, say)
@@ -939,7 +939,8 @@ def paint(psd_path, out_path, opts=None, progress=None):
     ai_usage = {}
     keep_empty = None  # 캐릭터 방식에서 비워 둘 배경 영역
     if opts.hint_source == "characters":
-        region_key, keys, names, ai_usage, keep_empty = character_match(labels, n, boundary, frame, opts, out_path, say)
+        region_key, keys, names, ai_usage, keep_empty = character_match(labels, n, boundary, frame, opts, out_path, say,
+                                                                        psd_path)
         n = len(region_key) - 1
         image_mode = False
     else:

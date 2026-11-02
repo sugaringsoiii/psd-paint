@@ -562,14 +562,39 @@ TILE_REMINDER = """앞 판과 같은 방식으로 답한다 (첫 판의 가이�
 BASE_GUIDE = Path(__file__).parent / "assets" / "guides" / "기본 가이드.md"
 
 
-def work_guide_path():
-    return data_dir() / "작품 가이드.md"
+WORK_GUIDE = "작품 가이드.md"
 
 
-def guide_text():
-    """기본 가이드 + 작품 가이드(캐릭터 탭에서 쓴 메모)."""
+def find_work_guide(start):
+    """원고 폴더부터 위로 올라가며 가장 가까운 '작품 가이드.md'. 없으면 None.
+
+    작품 폴더(예: 귀농귀촌/)에 두면 그 아래 화·페이지 폴더의 PSD가 모두 같은 가이드를 쓴다. 홈 폴더 위로는 올라가지 않는다.
+    """
+    if not start:
+        return None
+    folder = Path(start)
+    if folder.suffix:  # 파일이면 그 폴더부터
+        folder = folder.parent
+    home = Path.home()
+    for _ in range(6):
+        path = folder / WORK_GUIDE
+        if path.exists():
+            return path
+        if folder == home or folder.parent == folder:
+            break
+        folder = folder.parent
+    return None
+
+
+def work_guide_path(start=None):
+    """이 원고가 쓸 작품 가이드 파일. 원고 폴더 쪽에 없으면 앱 데이터 폴더의 공용 작품 가이드."""
+    return find_work_guide(start) or data_dir() / WORK_GUIDE
+
+
+def guide_text(start=None):
+    """기본 가이드(앱에 들어 있음) + 작품 가이드(원고 폴더 쪽, 없으면 공용)."""
     parts = []
-    for path in (BASE_GUIDE, work_guide_path()):
+    for path in (BASE_GUIDE, work_guide_path(start)):
         try:
             text = path.read_text().strip()
         except OSError:
@@ -635,7 +660,7 @@ def profile_images(chars):
     return out
 
 
-def tiles_job(sheets, chars, count):
+def tiles_job(sheets, chars, count, psd_path=None):
     profiles = profile_images(chars)
     names = [c["name"] for c in chars]
     looks = looks_text(chars)
@@ -643,7 +668,7 @@ def tiles_job(sheets, chars, count):
                        "character": {"type": "string", "enum": names + ["모름", "없음"]}})
     schema = match._obj({"items": {"type": "array", "items": item}})
     prompt = TILE_PROMPT.format(names=", ".join(n for n, _ in profiles) or "(대표 그림 없음)",
-                                parts=", ".join(TILE_PARTS), looks=looks, count=count, guide=guide_text())
+                                parts=", ".join(TILE_PARTS), looks=looks, count=count, guide=guide_text(psd_path))
     return match.Job(np.array([0]), [], [im for _, im in profiles], sheets, prompt, schema, map_label="[영역 확인]"), profiles
 
 
@@ -731,7 +756,7 @@ def panel_backgrounds(labels, frame, margin=8):
 BUNDLE_SUFFIX = ".psdpaint"
 
 
-def export_bundle(path, presets, profiles):
+def export_bundle(path, presets, profiles, guide_from=None):
     """색상 프리셋과 캐릭터 프로필(대표 그림 포함)을 한 파일(zip)로 내보낸다."""
     import zipfile
 
@@ -747,7 +772,7 @@ def export_bundle(path, presets, profiles):
         z.writestr("psd-paint.json", json.dumps({"version": 1, "presets": presets, "characters": items},
                                                 ensure_ascii=False, indent=1))
         try:
-            z.writestr("작품 가이드.md", work_guide_path().read_text())
+            z.writestr("작품 가이드.md", work_guide_path(guide_from).read_text())
         except OSError:
             pass
 
@@ -849,3 +874,58 @@ def check_maps(state, regions, width=900):
             piece = piece.resize((width, round(piece.height * width / piece.width)), Image.LANCZOS)
         out.append(piece)
     return out
+
+
+# ---- 고친 기록 (내 컴퓨터에만 남는다. 개선 제안을 보낼 때 사용자가 확인하고 직접 올린다) ----
+def mistakes_path():
+    return data_dir() / "실수 기록.json"
+
+
+def record_fixes(fixes, source):
+    """고친 내용을 '무엇 → 무엇'으로만 센다 (그림·파일 경로·캐릭터 이름은 남기지 않는다).
+
+    fixes: [(전 부위, 새 부위, 사람이 바뀌었나)], source: 'AI 검수' 또는 '직접 수정'
+    """
+    if not fixes:
+        return
+    from datetime import date
+
+    path = mistakes_path()
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        data = {"since": date.today().isoformat(), "counts": {}}
+    counts = data.setdefault("counts", {})
+    for before, after, person in fixes:
+        if before != after:
+            key = f"[{source}] {before} → {after}"
+            counts[key] = counts.get(key, 0) + 1
+        if person:
+            key = f"[{source}] 다른 사람으로 답함"
+            counts[key] = counts.get(key, 0) + 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+
+
+def suggestion_text(guide_path=None, top=15):
+    """개선 제안 글: 자주 고친 것 + 작품 가이드의 '자주 틀리는 곳' 줄. 사용자가 보고 GitHub 이슈로 올린다."""
+    lines = ["psd-paint 칸 답에서 자주 고친 것과 작품 가이드의 메모입니다. 공통 가이드에 넣을 만한 규칙을 골라 주세요.", ""]
+    try:
+        data = json.loads(mistakes_path().read_text())
+    except (OSError, ValueError):
+        data = {}
+    counts = sorted(data.get("counts", {}).items(), key=lambda kv: -kv[1])[:top]
+    lines.append(f"## 자주 고친 것 ({data.get('since', '-')} 부터)")
+    lines += [f"- {k}: {v}번" for k, v in counts] or ["- (기록 없음)"]
+    lines += ["", "## 작품 가이드에 적은 '자주 틀리는 곳'"]
+    notes = []
+    try:
+        text = Path(guide_path).read_text() if guide_path else ""
+    except OSError:
+        text = ""
+    for line in text.splitlines():
+        if any(w in line for w in ("틀", "실수", "헷갈", "자주")):
+            notes.append(line.strip() if line.strip().startswith("-") else f"- {line.strip()}")
+    lines += notes or ["- (없음)"]
+    lines += ["", "(캐릭터 이름은 작품 가이드에서 그대로 옮겨졌을 수 있어요. 올리기 전에 지우거나 바꿔 주세요.)"]
+    return "\n".join(lines)

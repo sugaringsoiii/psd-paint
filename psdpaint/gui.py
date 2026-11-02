@@ -487,7 +487,8 @@ class PresetsTab(QWidget):
         try:
             if kind == "psdpaint":
                 profiles = self.characters_tab.profiles if self.characters_tab else []
-                characters.export_bundle(path, chosen, profiles)
+                tab = self.characters_tab
+                characters.export_bundle(path, chosen, profiles, tab.work_folder if tab else None)
             elif kind == "cls":
                 write_cls(path, colors)
             elif kind == "aco":
@@ -536,7 +537,7 @@ class PresetsTab(QWidget):
         added = 0
         if self.characters_tab is not None:
             added = self.characters_tab.merge(profiles)
-            if guide.strip() and not self.characters_tab.guide.toPlainText().strip():
+            if guide.strip() and not self.characters_tab.guide.toPlainText().strip():  # 지금 작품 가이드 파일에 채운다
                 self.characters_tab.guide.setPlainText(guide)  # 작품 가이드는 비어 있을 때만 채운다
         Dialog(self, f"색 {len(new)}개, 캐릭터 {added}명을 가져왔어요.",
                "이름이 같은 색·캐릭터는 지금 것을 그대로 뒀어요." if len(new) < len(presets) or added < len(profiles) else "",
@@ -602,14 +603,26 @@ class CharactersTab(QWidget):
         base_btn.setToolTip("앱에 들어 있는 공통 규칙(손·옷 구조·배경 등)을 엽니다.")
         base_btn.clicked.connect(lambda: open_path(characters.BASE_GUIDE))
         guide_head.addWidget(base_btn)
+        suggest_btn = button("개선 제안 보내기", "ghost", "upload")
+        suggest_btn.setToolTip("고친 기록과 작품 가이드의 '자주 틀리는 곳'을 정리해 GitHub 이슈 작성 화면을 엽니다.\n"
+                               "내용을 확인하고 직접 올립니다. 원고 그림·파일 경로는 넣지 않습니다.")
+        suggest_btn.clicked.connect(self.send_suggestion)
+        guide_head.addWidget(suggest_btn)
         guide_note = label("이 작품만의 규칙을 적으면 AI가 칸에 답할 때 함께 읽습니다. 의상 구성, 캐릭터를 구분하는 점, "
-                           "자주 틀리는 곳을 한 줄씩 적으세요.", "summary")
+                           "자주 틀리는 곳을 한 줄씩 적으세요. 작품 폴더에 저장해 두면 그 아래 원고가 모두 같은 가이드를 씁니다.",
+                           "summary")
         guide_note.setWordWrap(True)
+        self.guide_where = label("", "summary")
+        self.guide_where.setWordWrap(True)
+        place = QHBoxLayout()
+        place.addWidget(self.guide_where, 1)
+        self.guide_move = QPushButton("작품 폴더에 두기")
+        self.guide_move.setToolTip("작품 가이드를 고른 폴더에 '작품 가이드.md'로 저장합니다.")
+        self.guide_move.clicked.connect(self.choose_guide_folder)
+        place.addWidget(self.guide_move)
         self.guide = QPlainTextEdit()
-        try:
-            self.guide.setPlainText(characters.work_guide_path().read_text())
-        except OSError:
-            pass
+        self.guide_file = None
+        self.work_folder = None
         self.guide.setPlaceholderText("- 교복은 검정 재킷 + 베이지 니트 조끼 + 흰 셔츠 + 파란 넥타이\n"
                                       "- 하늘은 늘 고양이 귀 머리띠. 윤재는 이번 화 셔츠만\n"
                                       "- 컵 든 손을 소매로 자주 틀린다")
@@ -617,11 +630,67 @@ class CharactersTab(QWidget):
         self.guide.textChanged.connect(self.save_guide)
         pv.addLayout(guide_head)
         pv.addWidget(guide_note)
+        pv.addLayout(place)
         pv.addWidget(self.guide)
+        self.set_work_folder(None)
         self.render()
 
+    def set_work_folder(self, folder):
+        """파일 목록이 바뀌면 그 원고 폴더의 작품 가이드를 연다 (없으면 공용 작품 가이드)."""
+        self.work_folder = folder
+        path = characters.work_guide_path(folder)
+        if path == self.guide_file:
+            return
+        self.guide_file = path
+        self.guide.blockSignals(True)
+        try:
+            self.guide.setPlainText(path.read_text())
+        except OSError:
+            self.guide.setPlainText("")
+        self.guide.blockSignals(False)
+        shared = path.parent == characters.data_dir()
+        self.guide_where.setText(("공용 작품 가이드 (작품 폴더에 따로 두지 않았어요)" if shared
+                                  else f"작품 가이드 파일: {path}"))
+
+    def choose_guide_folder(self):
+        start = str(self.work_folder or Path.home())
+        d = QFileDialog.getExistingDirectory(self, "작품 가이드를 둘 작품 폴더", start)
+        if not d:
+            return
+        dest = Path(d) / characters.WORK_GUIDE
+        if not dest.exists():
+            dest.write_text(self.guide.toPlainText())
+        self.guide_file = None
+        self.set_work_folder(d if self.work_folder is None else self.work_folder)
+        if self.guide_file != dest:  # 지금 원고가 그 폴더 아래가 아니면 그 파일을 바로 연다
+            self.guide_file = dest
+            self.guide.blockSignals(True)
+            self.guide.setPlainText(dest.read_text())
+            self.guide.blockSignals(False)
+            self.guide_where.setText(f"작품 가이드 파일: {dest}")
+
+    def send_suggestion(self):
+        """고친 기록과 작품 가이드 메모를 보여 주고, 확인하면 GitHub 이슈 작성 화면을 연다 (자동으로 보내지 않는다)."""
+        import urllib.parse
+
+        form = QWidget()
+        fv = QVBoxLayout(form)
+        fv.setContentsMargins(0, 0, 0, 0)
+        text = QPlainTextEdit(characters.suggestion_text(self.guide_file))
+        text.setMinimumHeight(260)
+        fv.addWidget(text)
+        dlg = Dialog(self, "개선 제안 보내기",
+                     "아래 내용으로 GitHub 이슈 작성 화면을 엽니다. 고칠 곳이 있으면 고친 뒤 [확인]을 누르세요. "
+                     "브라우저에서 한 번 더 확인하고 직접 올립니다.", form)
+        if not dlg.exec():
+            return
+        body = text.toPlainText()[:6000]  # 주소 길이 한도
+        url = ("https://github.com/sugaringsoiii/psd-paint/issues/new?"
+               + urllib.parse.urlencode({"title": "칸 가이드 개선 제안", "body": body, "labels": "guide"}))
+        open_path(url)
+
     def save_guide(self):
-        path = characters.work_guide_path()
+        path = self.guide_file or characters.work_guide_path(self.work_folder)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self.guide.toPlainText())
 
@@ -1508,6 +1577,10 @@ class MainWindow(QMainWindow):
 
     def update_summary(self):
         n = self.files.topLevelItemCount()
+        # 캐릭터 탭의 작품 가이드는 목록 첫 파일의 작품 폴더 것을 연다
+        first = self.files.topLevelItem(0).data(COL_FILE, Qt.UserRole) if n else None
+        if hasattr(self, "characters_tab"):
+            self.characters_tab.set_work_folder(str(Path(first).parent) if first else None)
         self.summary.setText(f"{n}개" if n else "")
 
     @staticmethod
@@ -1909,6 +1982,11 @@ class MainWindow(QMainWindow):
             return
         self.edits.setdefault(row, []).append((region, int(st["region_key"][region])))
         self.redos.pop(row, None)  # 새로 고치면 되살릴 기록은 버린다
+        old = int(st["region_key"][region])
+        if st["opts"].hint_source == "characters":  # 캐릭터 방식에서 직접 고친 것은 개선 제안에 쓴다
+            before = st["keys"][old][0] if old >= 0 else "비움"
+            after = picked[0] if picked[0] is not None else "비움"
+            characters.record_fixes([(before.split("/")[-1], after.split("/")[-1], False)], "직접 수정")
         set_region(st, region, *picked)
         result.preview = quick_preview(st)
         self.set_preview_image(result.preview)
