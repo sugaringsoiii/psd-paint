@@ -548,27 +548,35 @@ TILE_PROMPT = """웹툰 밑색 작업이다.
 칸마다 빨간 영역이 무엇인지 적는다.
 - part: {parts} 중 하나.
 - character: 그 몸이 누구인지 등장인물 이름. 등장인물이 아니거나(엑스트라) 판단이 서지 않으면 모름, 사물·배경이면 없음.
-판단 규칙:
-- 둘레의 선화(얼굴·눈·귀·머리 모양·머리띠·옷깃·손가락)를 보고 그 영역이 몸의 어디인지 판단한다. 영역 안의 선(머리카락 결, 옷 주름)도 단서다.
-- 사람 실루엣 안은 배경이 아니다. 머리카락 가닥 사이 좁은 틈은 머리카락, 손가락 사이로 보이는 얼굴은 피부다.
-- 실루엣 밖, 컷 안의 빈 바탕과 하늘·벽·바닥은 배경이다. 말풍선·효과선 안도 배경이다.
-- 손에 든 물건은 사물, 그 손은 피부다.
-- 손은 꼭 피부로 적는다. 손가락 갈래·손톱·마디 선이 보이거나 소매 끝에서 나온 덩어리면 손이다 (옷 색으로 적지 않는다).
-  얼굴·목·귀·팔·다리처럼 맨살도 피부다. 누구 손인지 모르겠으면 character는 모름으로 두고 part는 피부로 적는다.
-- 같은 사람이 여러 칸에 나오면 같은 이름을 쓴다. 머리띠·머리 모양·귀걸이로 누구인지 알아본다.
-- 옷은 그 등장인물의 '등록한 옷' 안에서 고른다. 예를 들어 셔츠만 등록한 인물은 겉옷처럼 보여도 셔츠다.
-옷의 구조 (바깥에서 안으로 겹쳐 입는다):
-- 겉옷(재킷·코트·가디건): 가장 바깥. 어깨, 소매 전체(소매 끝까지), 앞판, 깃(라펠), 주머니 덮개, 단추가 달린 앞섶.
-- 상의(조끼·니트·스웨터): 겉옷 안, 셔츠 위. 겉옷 앞섶 사이로 V자·U자로 보이는 몸통 부분. 소매가 없거나 겉옷에 가린다.
-- 셔츠: 가장 안쪽. 겉옷을 입었으면 목깃(칼라), V자 안쪽 가슴, 소매 끝으로 나온 커프스만 보인다.
-  겉옷이 없으면 몸통 전체와 소매 전체가 셔츠다 (단추줄·가슴 주머니가 있는 쪽).
-- 넥타이·리본: 목깃 아래 매듭과, 거기서 아래로 좁고 길게 내려오는 띠.
-- 하의: 허리 아래 다리를 덮는 바지. 치마는 허리에서 퍼지는 주름. 신발은 발목 아래.
-- 부위는 옷의 경계(깃 가장자리·소매 끝·솔기·허리선)에서만 바뀐다. 주름선·접힌 선·팔이나 손이 가린 곳으로 나뉜 조각은 같은 옷이다.
-- 칸이 작아 헷갈리면 칸 둘레에서 그 조각이 어깨·팔·몸통 중 어디에 붙어 있는지 보고, 그 자리에 입는 옷을 고른다.
+아래 가이드를 따른다.
+
+{guide}
+
 등장인물:
 {looks}
 칸 번호 1 ~ {count}를 모두 적는다."""
+TILE_REMINDER = """앞 판과 같은 방식으로 답한다 (첫 판의 가이드를 그대로 따른다).
+- part: {parts} 중 하나. character: 등장인물 이름·모름·없음.
+- 손·얼굴·목은 피부. 옷은 그 인물의 등록한 옷 안에서, 옷 경계에서만 부위가 바뀐다.
+등장인물: {names}"""
+BASE_GUIDE = Path(__file__).parent / "assets" / "guides" / "기본 가이드.md"
+
+
+def work_guide_path():
+    return data_dir() / "작품 가이드.md"
+
+
+def guide_text():
+    """기본 가이드 + 작품 가이드(캐릭터 탭에서 쓴 메모)."""
+    parts = []
+    for path in (BASE_GUIDE, work_guide_path()):
+        try:
+            text = path.read_text().strip()
+        except OSError:
+            continue
+        if text:
+            parts.append(text)
+    return "\n\n".join(parts)
 
 
 def tile_regions(labels, cand):
@@ -635,7 +643,7 @@ def tiles_job(sheets, chars, count):
                        "character": {"type": "string", "enum": names + ["모름", "없음"]}})
     schema = match._obj({"items": {"type": "array", "items": item}})
     prompt = TILE_PROMPT.format(names=", ".join(n for n, _ in profiles) or "(대표 그림 없음)",
-                                parts=", ".join(TILE_PARTS), looks=looks, count=count)
+                                parts=", ".join(TILE_PARTS), looks=looks, count=count, guide=guide_text())
     return match.Job(np.array([0]), [], [im for _, im in profiles], sheets, prompt, schema, map_label="[영역 확인]"), profiles
 
 
@@ -738,10 +746,14 @@ def export_bundle(path, presets, profiles):
             items.append({"name": p["name"], "look": p.get("look", ""), "image": name})
         z.writestr("psd-paint.json", json.dumps({"version": 1, "presets": presets, "characters": items},
                                                 ensure_ascii=False, indent=1))
+        try:
+            z.writestr("작품 가이드.md", work_guide_path().read_text())
+        except OSError:
+            pass
 
 
 def import_bundle(path):
-    """→ (presets, profiles). 대표 그림은 앱 데이터 폴더에 풀어 둔다."""
+    """→ (presets, profiles, 작품 가이드 글). 대표 그림은 앱 데이터 폴더에 풀어 둔다."""
     import zipfile
 
     with zipfile.ZipFile(path) as z:
@@ -759,9 +771,10 @@ def import_bundle(path):
                 dest.write_bytes(z.read(c["image"]))
                 img = str(dest)
             profiles.append({"name": c["name"], "look": c.get("look", ""), "image": img})
+        guide = z.read("작품 가이드.md").decode() if "작품 가이드.md" in z.namelist() else ""
     presets = [{"name": p["name"], "rgb": [int(v) for v in p["rgb"]]} for p in data.get("presets", [])
                if isinstance(p.get("name"), str)]
-    return presets, profiles
+    return presets, profiles, guide
 
 
 def smooth_people(labels, person_of, part_of, pairs, share=0.8, ratio=0.2):

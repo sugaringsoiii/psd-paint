@@ -11,7 +11,10 @@ import threading
 from dataclasses import asdict
 from pathlib import Path
 
+import base64
+
 from mcp.server.mcpserver import Image, MCPServer
+from mcp.types import Annotations, ImageContent
 
 from .cli import output_path
 from .core import AwaitingAnswer, Options, PaintError, paint
@@ -33,6 +36,19 @@ server = MCPServer(
 )
 
 
+def _for_ai(path, width=None):
+    """AI만 볼 그림 (영역 확인 판·검수 지도 등). 사용자 화면에는 띄우지 않도록 audience를 assistant로 단다."""
+    from PIL import Image as PILImage
+
+    im = PILImage.open(path).convert("RGB")
+    if width and im.width > width:
+        im = im.resize((width, round(im.height * width / im.width)), PILImage.LANCZOS)
+    buf = io.BytesIO()
+    im.save(buf, "PNG", optimize=True)
+    return ImageContent(type="image", data=base64.b64encode(buf.getvalue()).decode(), mime_type="image/png",
+                        annotations=Annotations(audience=["assistant"]))
+
+
 def _partial(folder):
     """판마다 받은 칸 답 (전부 모이기 전)."""
     try:
@@ -50,15 +66,21 @@ def _tile_sheet(folder, got):
     todo = next((i for i in range(1, info["sheets"] + 1)
                  if any(t not in got for t in range((i - 1) * per + 1, min(i * per, count) + 1))), 1)
     first, last = (todo - 1) * per + 1, min(todo * per, count)
-    readme = (folder / "README.md").read_text()
-    prompt = readme.split("\n\n", 2)[2].split("답은 schema.json")[0].strip()
-    prompt = prompt.replace(f"칸 번호 1 ~ {count}를 모두 적는다.", f"이번 판의 칸 번호 {first} ~ {last}를 모두 적는다.")
+    if got:  # 두 번째 판부터는 가이드를 다시 보내지 않고 짧게 상기시킨다 (토큰 절약)
+        from .characters import TILE_PARTS, TILE_REMINDER
+        prompt = TILE_REMINDER.format(parts=", ".join(TILE_PARTS), names=", ".join(info["profiles"]))
+        prompt += f"\n이번 판의 칸 번호 {first} ~ {last}를 모두 적는다."
+    else:
+        readme = (folder / "README.md").read_text()
+        prompt = readme.split("\n\n", 2)[2].split("답은 schema.json")[0].strip()
+        prompt = prompt.replace(f"칸 번호 1 ~ {count}를 모두 적는다.", f"이번 판의 칸 번호 {first} ~ {last}를 모두 적는다.")
     out = [f"영역 확인 판 {todo}/{info['sheets']} (칸 {first}~{last}, 전체 {count}칸 중 {len(got)}칸 답함). 작업: {folder}\n"
            f"이 판의 칸 {first}~{last}만 보고 칸마다 부위·누구인지 적어 apply_characters(job=위 경로, items=[…])를 호출하세요. "
            "다음 판은 답하면 이어서 드립니다. 칸을 하나씩 둘레의 얼굴·머리띠·옷깃까지 확인하고, 같은 사람은 판이 바뀌어도 같은 이름으로 적으세요.\n"]
     for i, name in enumerate(info["profiles"], 1):
-        out += [f"[등장인물 {name}]", Image(path=folder / f"profile_{i}.png")]
-    out += [f"[영역 확인 {todo}]", Image(path=folder / f"tiles_{todo}.png"), prompt]
+        # 첫 판엔 대표 그림을 크게, 다음 판부턴 작게 다시 보여 준다 (같은 사람을 같은 이름으로 답하게)
+        out += [f"[등장인물 {name}]", _for_ai(folder / f"profile_{i}.png", None if not got else 260)]
+    out += [f"[영역 확인 {todo}]", _for_ai(folder / f"tiles_{todo}.png"), prompt]
     return out
 
 
@@ -97,10 +119,10 @@ def _check_step(folder, state):
            f"apply_characters(job={folder}, items=[…], checked=true)로 다시 보내세요. 예: 손·얼굴이 옷 색, "
            "한 사람의 옷 일부가 다른 사람 색, 재킷인데 셔츠 색. 고칠 칸이 없으면 apply_characters(job, items=[], checked=true)를 "
            "부르거나 그대로 끝내세요. 한 번만 확인합니다."]
-    for i, im in enumerate(check_maps(state, info["regions"]), 1):
+    for i, im in enumerate(check_maps(state, info["regions"], width=720), 1):
         path = folder / f"check_{i}.png"
         im.convert("RGB").save(path)
-        out += [f"[칠한 결과 {i}]", Image(path=path)]
+        out += [f"[칠한 결과 {i}]", _for_ai(path)]
     return out
 
 

@@ -524,7 +524,7 @@ class PresetsTab(QWidget):
 
     def import_bundle(self, path):
         try:
-            presets, profiles = characters.import_bundle(path)
+            presets, profiles, guide = characters.import_bundle(path)
         except (ValueError, OSError, KeyError) as e:
             Dialog(self, "가져오지 못했습니다.", str(e) or "파일을 읽을 수 없습니다.", cancel=False).exec()
             return
@@ -536,6 +536,8 @@ class PresetsTab(QWidget):
         added = 0
         if self.characters_tab is not None:
             added = self.characters_tab.merge(profiles)
+            if guide.strip() and not self.characters_tab.guide.toPlainText().strip():
+                self.characters_tab.guide.setPlainText(guide)  # 작품 가이드는 비어 있을 때만 채운다
         Dialog(self, f"색 {len(new)}개, 캐릭터 {added}명을 가져왔어요.",
                "이름이 같은 색·캐릭터는 지금 것을 그대로 뒀어요." if len(new) < len(presets) or added < len(profiles) else "",
                cancel=False).exec()
@@ -593,7 +595,35 @@ class CharactersTab(QWidget):
         pv.addLayout(top)
         pv.addWidget(note)
         pv.addWidget(scroll, 1)
+        guide_head = QHBoxLayout()
+        guide_head.addWidget(label("작품 가이드", "section"))
+        guide_head.addStretch()
+        base_btn = button("기본 가이드 보기", "ghost", "file")
+        base_btn.setToolTip("앱에 들어 있는 공통 규칙(손·옷 구조·배경 등)을 엽니다.")
+        base_btn.clicked.connect(lambda: open_path(characters.BASE_GUIDE))
+        guide_head.addWidget(base_btn)
+        guide_note = label("이 작품만의 규칙을 적으면 AI가 칸에 답할 때 함께 읽습니다. 의상 구성, 캐릭터를 구분하는 점, "
+                           "자주 틀리는 곳을 한 줄씩 적으세요.", "summary")
+        guide_note.setWordWrap(True)
+        self.guide = QPlainTextEdit()
+        try:
+            self.guide.setPlainText(characters.work_guide_path().read_text())
+        except OSError:
+            pass
+        self.guide.setPlaceholderText("- 교복은 검정 재킷 + 베이지 니트 조끼 + 흰 셔츠 + 파란 넥타이\n"
+                                      "- 하늘은 늘 고양이 귀 머리띠. 윤재는 이번 화 셔츠만\n"
+                                      "- 컵 든 손을 소매로 자주 틀린다")
+        self.guide.setFixedHeight(120)
+        self.guide.textChanged.connect(self.save_guide)
+        pv.addLayout(guide_head)
+        pv.addWidget(guide_note)
+        pv.addWidget(self.guide)
         self.render()
+
+    def save_guide(self):
+        path = characters.work_guide_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.guide.toPlainText())
 
     def render(self):
         clear_layout(self.box)
