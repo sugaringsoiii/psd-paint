@@ -104,13 +104,14 @@ def inspect_psd(psd_path: str) -> str:
 @server.tool()
 def paint_psd(psd_path: str, reference: str = "", output_dir: str = "", line_group: str = "선화",
               hint_group: str = "참고", max_layers: int = 10, offset_px: int = 2, auto_fill: bool = True,
-              boundary_layers: str = "컷*, *테두리*"):
-    """선화 PSD에 밑색 레이어를 깔아 새 PSD(원본이름_밑색.psd)로 저장한다. 원본은 바꾸지 않는다.
+              boundary_layers: str = "컷*, *테두리*", overwrite: bool = False):
+    """선화 PSD에 밑색 레이어를 깔아 새 PSD(원본이름_밑색.psd)로 저장한다. overwrite가 아니면 원본은 바꾸지 않는다.
 
     - reference를 비우면 PSD 안의 '참고' 폴더(점·낙서 힌트)를 쓰고, 힌트가 없는 영역은 회색으로 자동 칠한다.
     - reference에 PNG·JPG·PSD 경로를 주면 그 레퍼런스의 색을 따른다. 다른 페이지(캐릭터 시트 등)면
       레퍼런스·원고 번호 지도 이미지를 돌려주니, 보고 나서 apply_match를 호출한다.
     - boundary_layers: 선화 외에 경계로 쓸 레이어 이름 패턴(쉼표 구분, * 사용).
+    - overwrite: 새 파일 대신 원본 PSD에 저장한다. 처음 한 번 원본을 '이름_백업.psd'로 남긴다.
     """
     opts = Options(line_group=line_group, hint_group=hint_group, max_layers=max_layers, offset_px=offset_px,
                    auto_fill=auto_fill, ai_mode="files",
@@ -118,7 +119,7 @@ def paint_psd(psd_path: str, reference: str = "", output_dir: str = "", line_gro
     if reference:
         opts.hint_source = "psd" if reference.lower().endswith(".psd") else "image"
         opts.hint_path = reference
-    out_path = output_path(psd_path, output_dir or None, "_밑색")
+    out_path = Path(psd_path) if overwrite else output_path(psd_path, output_dir or None, "_밑색")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     return _run(psd_path, out_path, opts)
 

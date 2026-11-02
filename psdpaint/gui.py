@@ -837,21 +837,29 @@ class MainWindow(QMainWindow):
         # 결과
         self.same_dir = QRadioButton("원본과 같은 폴더")
         self.other_dir = QRadioButton("지정한 폴더")
+        self.overwrite = QRadioButton("원본에 덮어쓰기")
         group = QButtonGroup(w)
-        group.addButton(self.same_dir)
-        group.addButton(self.other_dir)
-        (self.other_dir if s.value("use_out_dir", False, bool) else self.same_dir).setChecked(True)
+        for b in (self.same_dir, self.other_dir, self.overwrite):
+            group.addButton(b)
+        mode = s.value("save_mode", "other" if s.value("use_out_dir", False, bool) else "same")
+        {"same": self.same_dir, "other": self.other_dir, "overwrite": self.overwrite}.get(
+            mode, self.same_dir).setChecked(True)
         self.out_dir = QLineEdit(s.value("out_dir", ""))
         self.out_dir.setPlaceholderText("결과 폴더")
-        browse = QPushButton("찾기")
-        browse.clicked.connect(self.pick_out_dir)
+        self.out_browse = QPushButton("찾기")
+        self.out_browse.clicked.connect(self.pick_out_dir)
         self.suffix = QLineEdit(s.value("suffix", "_밑색"))
+        self.overwrite_note = label("원본 PSD에 밑색 폴더를 넣어 저장합니다. 다시 칠하면 밑색 폴더만 새것으로 바뀝니다. "
+                                    "처음 덮어쓸 때 원본을 '이름_백업.psd'로 남깁니다.", "summary")
+        self.overwrite_note.setWordWrap(True)
         section("결과")
-        place = hbox(self.same_dir, self.other_dir, stretch=True)
-        place.setSpacing(12)
-        add("저장 위치", place)
-        add("결과 폴더", hbox(self.out_dir, browse))
+        add("저장 위치", vbox(self.same_dir, self.other_dir, self.overwrite), top=True)
+        add("결과 폴더", hbox(self.out_dir, self.out_browse))
         add("파일 이름 뒤", self.suffix)
+        add("", self.overwrite_note)
+        for b in (self.same_dir, self.other_dir, self.overwrite):
+            b.toggled.connect(self.update_out_enabled)
+        self.update_out_enabled()
 
         # [파일 열기]에 쓸 앱. 자동이면 클립스튜디오 → 포토샵 → 기본 앱 순서로 설치된 것을 쓴다
         self.apps = find_apps()
@@ -965,6 +973,8 @@ class MainWindow(QMainWindow):
     # ---- 설정 ----
     def save_settings(self):
         s = self.settings
+        s.setValue("save_mode", "overwrite" if self.overwrite.isChecked() else
+                   "other" if self.other_dir.isChecked() else "same")
         s.setValue("use_out_dir", self.other_dir.isChecked())
         s.setValue("out_dir", self.out_dir.text())
         s.setValue("suffix", self.suffix.text())
@@ -1018,6 +1028,11 @@ class MainWindow(QMainWindow):
         on = not self.src_layer.isChecked()
         self.hint_path.setEnabled(on)
         self.hint_browse.setEnabled(on)
+
+    def update_out_enabled(self):
+        over = self.overwrite.isChecked()
+        self.suffix.setEnabled(not over)
+        self.overwrite_note.setVisible(over)
 
     def pick_hint_path(self):
         filt = "이미지 (*.png *.jpg *.jpeg *.webp)" if self.src_image.isChecked() else "Photoshop (*.psd)"
@@ -1196,7 +1211,8 @@ class MainWindow(QMainWindow):
         for row in rows:
             item = self.files.topLevelItem(row)
             src = item.data(COL_FILE, Qt.UserRole)
-            jobs.append((row, src, output_path(src, out_dir, self.suffix.text()), item.data(COL_FILE, REF_ROLE)))
+            dst = Path(src) if self.overwrite.isChecked() else output_path(src, out_dir, self.suffix.text())
+            jobs.append((row, src, dst, item.data(COL_FILE, REF_ROLE)))
             self.set_status(item, "대기", style.MUTED)
             item.setText(COL_INFO, "")
             self.results.pop(row, None)

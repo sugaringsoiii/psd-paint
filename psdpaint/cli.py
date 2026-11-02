@@ -20,6 +20,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="psdpaint", description="선화 PSD에 참고 레이어 힌트대로 밑색 레이어를 만든다")
     ap.add_argument("files", nargs="+", help="처리할 PSD 파일들")
     ap.add_argument("-o", "--out", help="결과 폴더 (기본: 원본과 같은 폴더)")
+    ap.add_argument("--overwrite", action="store_true",
+                    help="원본 PSD에 덮어쓴다. 처음 한 번 원본을 '이름_백업.psd'로 남긴다")
     ap.add_argument("--suffix", default="_밑색", help="결과 파일 이름 뒤에 붙일 말 (기본: _밑색)")
     ap.add_argument("--line", default=Options.line_group, help="선화 폴더 이름")
     ap.add_argument("--hint", default=Options.hint_group, help="참고(힌트) 폴더 이름")
@@ -51,7 +53,7 @@ def main(argv=None):
         opts.ai_key = os.environ.get("ANTHROPIC_API_KEY") or ai.get_key("claude")
     failed = waiting = 0
     for i, f in enumerate(args.files, 1):
-        dst = output_path(f, args.out, args.suffix)
+        dst = Path(f) if args.overwrite else output_path(f, args.out, args.suffix)
         dst.parent.mkdir(parents=True, exist_ok=True)
         print(f"[{i}/{len(args.files)}] {f}")
         t = time.time()

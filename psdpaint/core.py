@@ -1,5 +1,7 @@
 """선화 PSD에 참고 레이어 힌트대로 밑색 레이어를 만든다."""
 import json
+import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -466,7 +468,15 @@ def fill(labels, boundary, region_key, keys, opts):
     return cls
 
 
+def backup_path(psd_path):
+    p = Path(psd_path)
+    return p.with_name(f"{p.stem}_백업{p.suffix}")
+
+
 def write(psd, line_group, cls, keys, names_top_down, opts, out_path):
+    # 이미 칠한 파일(원본 덮어쓰기·결과 다시 칠하기)이면 전에 만든 밑색 폴더를 새것으로 바꾼다
+    while (old := psdio.find(psd, opts.output_group, True)) is not None:
+        old.parent.remove(old)
     parent = line_group.parent
     group = psdio.new_group(parent, opts.output_group)
     lut_rgb = np.array([(0, 0, 0)] + [rgb for _, rgb in keys], np.uint8)
@@ -495,7 +505,14 @@ def write(psd, line_group, cls, keys, names_top_down, opts, out_path):
     if opts.hide_background:
         for layer in psdio.matching(psd, opts.background):
             layer.visible = False
-    psd.save(out_path)
+    # 임시 파일에 다 쓴 뒤 바꿔 넣는다. 저장 중에 멈춰도 원래 파일이 깨지지 않는다
+    out_path = Path(out_path)
+    tmp = out_path.with_name(f".{out_path.name}.tmp")
+    try:
+        psd.save(tmp)
+        os.replace(tmp, out_path)
+    finally:
+        tmp.unlink(missing_ok=True)
     return list(reversed(written))
 
 
@@ -581,6 +598,9 @@ def paint(psd_path, out_path, opts=None, progress=None):
     opts = opts or Options()
     say = progress or (lambda msg, frac: None)
     say("PSD 여는 중", 0.0)
+    if Path(out_path).resolve() == Path(psd_path).resolve() and not backup_path(psd_path).exists():
+        # 원본에 덮어쓰기: 처음 한 번만 원본을 '이름_백업.psd'로 남긴다
+        shutil.copy2(psd_path, backup_path(psd_path))
     psd = PSDImage.open(psd_path)
     say("선화 영역 나누는 중", 0.15)
     line_group, boundary, frame, labels, n = segment(psd, opts)
