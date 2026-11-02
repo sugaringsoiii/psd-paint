@@ -309,14 +309,23 @@ class Popup(QWidget):
             self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
             edit = search_box("이름·색 검색")
             max_h -= 36  # 검색칸만큼 목록을 줄인다
+            empty = label("검색 결과가 없어요.", "muted")
+            empty.setAlignment(Qt.AlignCenter)
+            empty.hide()
 
             def filter_(text):
                 q = text.strip().lower()
+                shown = 0
                 for i in range(lst.count()):
                     it = lst.item(i)
                     # 검색 중에는 구역 머리를 숨긴다
                     hay = (it.text() + " " + (it.data(RIGHT_ROLE) or "")).lower()
                     it.setHidden(bool(q) and (it.data(Qt.UserRole) is None or q not in hay))
+                    shown += not it.isHidden()
+                # 목록 자리에 같은 높이로 안내 글자를 보여 팝업 크기가 흔들리지 않게 한다
+                empty.setFixedHeight(lst.height())
+                lst.setVisible(bool(shown))
+                empty.setVisible(not shown)
 
             def first():
                 for i in range(lst.count()):
@@ -329,6 +338,8 @@ class Popup(QWidget):
             QTimer.singleShot(0, edit.setFocus)  # 뜨자마자 바로 입력
         lst.setFixedHeight(max(30, min(len(entries) * 30 + 6, max_h)))  # 항목 높이 30
         self.body.addWidget(lst)
+        if search:
+            self.body.addWidget(empty)
         return lst
 
     def done(self, data):
