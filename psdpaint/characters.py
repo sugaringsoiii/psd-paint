@@ -474,8 +474,23 @@ def save_identify(job, crops, folder):
         "저장한 뒤 psd-paint에서 같은 파일을 다시 실행하면 답을 적용한다.\n")
 
 
-def assign(part_of, person_of, who, chars, n, labels, background):
+CLOTHES_PARTS = {"겉옷", "상의", "셔츠", "넥타이·리본", "하의", "치마", "신발", "양말"}
+EXTRA_GROUP = "엑스트라"
+EXTRA_LAYERS = ["머리", "피부", "옷", "기타"]  # 엑스트라는 이 네 레이어로만 나눈다
+
+
+def extra_layer(part):
+    if part == "머리카락":
+        return "머리"
+    if part == "피부":
+        return "피부"
+    return "옷" if part in CLOTHES_PARTS else "기타"
+
+
+def assign(part_of, person_of, who, chars, n, labels, background, extra_group=EXTRA_GROUP):
     """부위·사람·캐릭터 → 영역별 키. 레이어는 부위마다 하나, 색은 캐릭터마다 다르다.
+
+    등록하지 않은 인물(엑스트라)은 extra_group 폴더 안의 머리·피부·옷·기타 네 레이어로 나눈다 (레이어 이름 '폴더/레이어').
 
     부위를 정하지 못한 배경 아닌 영역은 둘레를 따른다.
     → region_key (영역 수+1), keys [(레이어, rgb)], 레이어 이름 순서
@@ -505,13 +520,19 @@ def assign(part_of, person_of, who, chars, n, labels, background):
                     j = extras.index(pid) if pid in extras else 0
                     tone = int(np.clip(match.PART_TONES.get(part, 200) + (j % 3 - 1) * 12, 40, 245))
                     rgb = (tone, tone, tone)
-            key = (match.LAYER_OF_PART.get(part, part), tuple(int(v) for v in rgb))
+            if extra_group and not colors:
+                layer = f"{extra_group}/{extra_layer(part)}"
+            else:
+                layer = match.LAYER_OF_PART.get(part, part)
+            key = (layer, tuple(int(v) for v in rgb))
         if key not in keys:
             keys.append(key)
         region_key[r] = keys.index(key)
     areas = np.bincount(labels.ravel(), minlength=n + 1)
     spread(labels, region_key, [r for r in range(1, n + 1) if areas[r] and region_key[r] < 0 and not background[r]])
-    order = [match.LAYER_OF_PART.get(p, p) for p in match.PARTS] + ["사물"]
+    # 엑스트라 폴더는 맨 아래
+    order = ([match.LAYER_OF_PART.get(p, p) for p in match.PARTS] + ["사물"]
+             + [f"{extra_group}/{nm}" for nm in EXTRA_LAYERS])
     names = sorted({k[0] for k in keys}, key=lambda s: order.index(s) if s in order else len(order))
     return region_key, keys, names
 

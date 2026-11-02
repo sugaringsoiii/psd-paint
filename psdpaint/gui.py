@@ -1051,12 +1051,16 @@ class MainWindow(QMainWindow):
                                  "올리면 칸·토큰이 줄고, 내리면 머리카락 틈 같은 작은 곳이 더 정확해집니다.")
         add("칸 최소 넓이", self.tile_min)
         tile_label = grid.itemAtPosition(row - 1, 0).widget()
+        self.extra_folder = QCheckBox("등록하지 않은 인물은 '엑스트라' 폴더에 머리·피부·옷·기타로 따로 칠하기")
+        self.extra_folder.setChecked(s.value("extra_folder", True, bool))
         self.tile_auto_bg = QCheckBox("컷 배경은 묻지 않고 비우기 (칸·토큰 절약)")
         self.tile_auto_bg.setChecked(s.value("tile_auto_bg", True, bool))
         add("", self.tile_auto_bg)
+        add("엑스트라", self.extra_folder)
+        extra_label = grid.itemAtPosition(row - 1, 0).widget()
         add("", self.looks_note)
         self.looks_row = (self.paint_via, via_label, self.parts_method, parts_label, self.tile_min, tile_label,
-                          self.tile_auto_bg, self.looks_note)
+                          self.tile_auto_bg, self.extra_folder, extra_label, self.looks_note)
         self.parts_method.currentIndexChanged.connect(self.update_image_model)
         self.paint_via.currentIndexChanged.connect(self.update_via)
         for b in (self.src_layer, self.src_chars):
@@ -1222,6 +1226,7 @@ class MainWindow(QMainWindow):
         s.setValue("parts_method", self.parts_method.currentData())
         s.setValue("tile_min_area", self.tile_min.value())
         s.setValue("tile_auto_bg", self.tile_auto_bg.isChecked())
+        s.setValue("extra_folder", self.extra_folder.isChecked())
         s.setValue("image_model", self.image_model.currentData())
         pid = self.provider.currentData()
         s.setValue("provider", pid)
@@ -1244,6 +1249,7 @@ class MainWindow(QMainWindow):
             ai_parts=self.parts_method.currentData(),
             tile_min_area=self.tile_min.value(),
             tile_auto_bg=self.tile_auto_bg.isChecked(),
+            extra_group="엑스트라" if self.extra_folder.isChecked() else "",
             ai_image_model=self.image_model.currentData(),
             # 이미지 지도는 Gemini 이미지 모델이라 제공자와 상관없이 Gemini 키를 쓴다
             ai_image_key=((self.api_key.text().strip() if self.provider.currentData() == "gemini" else "")

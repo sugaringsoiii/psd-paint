@@ -32,6 +32,7 @@ class Options:
     characters: list = field(default_factory=list)  # 캐릭터 프리셋 [{"name", "look", "colors": {부위: rgb}}]
     ai_image_model: str = "gemini-3.1-flash-lite-image"  # 캐릭터 방식에서 부위·사람을 칠해 나누는 이미지 모델 (Gemini)
     ai_image_key: str = ""              # 그 이미지 모델용 Gemini API 키 (실행할 때만 넘긴다)
+    extra_group: str = "엑스트라"        # 캐릭터 방식에서 등록하지 않은 인물을 모아 칠할 폴더 (머리·피부·옷·기타). 비우면 부위 레이어에 섞는다
     ai_parts: str = "image"             # 캐릭터 방식의 부위 나누기: image(Gemini 이미지 지도) · tiles(글 AI가 영역 확인 칸에 답)
     tile_min_area: int = 1000           # 영역 확인 칸에 넣을 최소 넓이(px). 더 작은 영역은 묻지 않고 둘레를 따른다 (토큰 절약)
     tile_auto_bg: bool = True           # 컷마다 둘레를 다 두른 가장 넓은 영역(컷 배경)은 묻지 않고 배경으로 둔다
@@ -556,7 +557,8 @@ def cap_layers(cls, keys, names_top_down, opts):
     area = {}
     for k, (name, _) in enumerate(keys, 1):
         area[name] = area.get(name, 0) + int(count[k])
-    used = [nm for nm in names_top_down if area.get(nm, 0) > 0]
+    # 하위 폴더 레이어(엑스트라/머리 등)는 정해 둔 묶음이라 합치지 않고 셈에서도 뺀다
+    used = [nm for nm in names_top_down if area.get(nm, 0) > 0 and "/" not in nm]
     if len(used) <= opts.max_layers:
         return []
     keep = set(sorted(used, key=lambda nm: -area[nm])[:opts.max_layers - 1])
@@ -635,6 +637,7 @@ def write(psd, line_group, cls, keys, names_top_down, opts, out_path):
     lut_rgb = np.array([(0, 0, 0)] + [rgb for _, rgb in keys], np.uint8)
     key_names = np.array([None] + [name for name, _ in keys], object)
     written = []
+    subgroups = {}
     for name in reversed(names_top_down):  # 아래 레이어부터 넣는다
         ks = np.nonzero(key_names == name)[0]
         m = np.isin(cls, ks)
@@ -647,7 +650,13 @@ def write(psd, line_group, cls, keys, names_top_down, opts, out_path):
         rgba[..., :3] = lut_rgb[cls[y0:y1, x0:x1]]
         rgba[..., 3] = sub * 255
         rgba[~sub, :3] = 0
-        psdio.new_pixel_layer(group, Image.fromarray(rgba, "RGBA"), name, int(y0), int(x0))
+        target, layer_name = group, name
+        if "/" in name:  # '엑스트라/머리' → 밑색 폴더 안 '엑스트라' 폴더의 '머리' 레이어
+            sub, layer_name = name.split("/", 1)
+            if sub not in subgroups:
+                subgroups[sub] = psdio.new_group(group, sub)
+            target = subgroups[sub]
+        psdio.new_pixel_layer(target, Image.fromarray(rgba, "RGBA"), layer_name, int(y0), int(x0))
         written.append(name)
     # 밑색 폴더를 선화 폴더 바로 아래로
     parent.remove(group)
@@ -910,7 +919,8 @@ def character_match(labels, n, boundary, frame, opts, out_path, say):
                                                                            opts, folder, say)
     except RuntimeError as e:
         raise PaintError(f"캐릭터 매칭 실패: {e}") from None
-    region_key, keys, names = characters.assign(part_of, person_of, who, chars, n, labels, background)
+    region_key, keys, names = characters.assign(part_of, person_of, who, chars, n, labels, background,
+                                                opts.extra_group)
     return region_key, keys, names, usage, background
 
 

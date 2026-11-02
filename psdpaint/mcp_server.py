@@ -215,6 +215,7 @@ def paint_psd(psd_path: str, reference: str = "", output_dir: str = "", line_gro
         opts.ai_parts = parts or settings.value("parts_method", "tiles")
         opts.tile_min_area = int(settings.value("tile_min_area", opts.tile_min_area))
         opts.tile_auto_bg = str(settings.value("tile_auto_bg", True)).lower() not in ("false", "0")
+        opts.extra_group = "" if str(settings.value("extra_folder", True)).lower() in ("false", "0") else "엑스트라"
         opts.ai_image_model = settings.value("image_model", chars.IMAGE_MODEL)
         opts.ai_image_key = ai.get_key("gemini") if opts.ai_parts == "image" else ""
     elif reference:
