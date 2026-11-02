@@ -57,6 +57,8 @@ class Job:
     occlusion_text: str = "없음"     # 가림 단서 (좁은 띠를 사이에 둔 번호 쌍)
     full_map: Image.Image = None  # 번호를 얹은 전체 원고 지도
     kmap: np.ndarray = None       # 픽셀 → 지도 번호
+    boundary: np.ndarray = None   # 선화 경계 (영역 확인 그림에 쓴다)
+    check_images: list = field(default_factory=list)  # 영역 확인 단계에 보낸 그림 (검토용으로 남긴다)
 
 
 def _font(size):
@@ -265,7 +267,8 @@ def make_job(labels, boundary, cand_ids, ref_rgb, palette, masks, bg_mask=None):
                                 groups=group_text(groups=groups), occlusion=occlusion_text)
     schema = full_schema(ids)
     return Job(cands, palette, ref_images, map_images, prompt, schema, palette_text=palette_list,
-               groups=groups, areas=areas, occlusion_text=occlusion_text, full_map=full_map, kmap=kmap)
+               groups=groups, areas=areas, occlusion_text=occlusion_text, full_map=full_map, kmap=kmap,
+               boundary=boundary)
 
 
 def _b64(img):
@@ -682,14 +685,112 @@ def person_crops(job, scene, max_side=1000):
     return out
 
 
+CHECK_PROMPT = """웹툰 밑색 작업의 부위 확인이다. [영역 확인] 그림은 칸마다 선화 일부를 잘라 낸 것이고,
+칸마다 영역 하나를 빨갛게 칠했다. 칸 위의 숫자가 칸 번호다.
+빨갛게 칠한 영역이 무엇인지 칸마다 하나 고른다: {cats}
+- 둘레의 선화(얼굴·눈·귀·머리 모양·옷깃·손가락)를 보고 그 영역이 몸의 어디인지 판단한다. 영역 안의 선(머리카락 결, 옷 주름)도 단서다.
+- 머리카락: 머리카락 결이 있는 덩어리. 앞머리 사이, 머리띠 안쪽, 뒷머리도 머리카락이다.
+- 피부: 얼굴·이마·목·귀·손·팔·다리처럼 맨살이 보이는 곳.
+- 옷은 종류를 고르되, 헷갈리면 가장 가까운 것을 고른다.
+- 사람 몸이 아니면 사물·배경, 판단이 서지 않으면 모름.
+칸 번호 1 ~ {count} 를 모두 적는다."""
+
+CHECK_MAX = 40          # 확인할 영역 수 상한 (넓은 영역부터)
+CHECK_MIN_AREA = 800    # 이보다 작은 영역은 확인하지 않는다
+CHECK_TILE = 300        # 칸 하나의 크기(px)
+CHECK_COLS, CHECK_ROWS = 5, 4
+OTHER = ["사물·배경", "모름"]
+CLOTHES = {"겉옷", "상의", "셔츠", "넥타이·리본", "하의", "치마", "신발", "양말"}
+
+
+def _coarse(part):
+    """크게 나눈 부위: 머리카락 · 피부 · 옷. 그 밖(머리띠·소품 등)은 None.
+
+    영역 확인은 이 셋 사이가 다를 때만 고친다. 옷끼리(재킷 깃↔넥타이 등)는 잘라 낸 칸만 봐서는 자주 틀리므로
+    전체 그림을 본 앞 단계를 믿는다.
+    """
+    return "옷" if part in CLOTHES else part if part in ("머리카락", "피부") else None
+
+
+def region_tiles(job, ks):
+    """영역마다 둘레를 넉넉히 잘라 그 영역만 빨갛게 칠한 칸을 만들고, 칸들을 판으로 모은다. → [판 이미지]"""
+    h, w = job.kmap.shape
+    t = CHECK_TILE
+    font = _font(22)
+    tiles = []
+    for n, k in enumerate(ks, 1):
+        m = job.kmap == k
+        ys, xs = np.nonzero(m)
+        cy, cx = (ys.min() + ys.max()) // 2, (xs.min() + xs.max()) // 2
+        # 영역보다 넉넉히 잘라 얼굴·몸 같은 둘레가 보이게 한다
+        half = int(max(ys.max() - ys.min(), xs.max() - xs.min(), 120) * 1.3)
+        y0, y1 = max(0, cy - half), min(h, cy + half)
+        x0, x1 = max(0, cx - half), min(w, cx + half)
+        rgb = np.full((y1 - y0, x1 - x0, 3), 255, np.uint8)
+        rgb[m[y0:y1, x0:x1]] = (255, 120, 120)
+        rgb[job.boundary[y0:y1, x0:x1]] = 0
+        im = Image.fromarray(rgb)
+        im.thumbnail((t, t), Image.LANCZOS)
+        cell = Image.new("RGB", (t, t + 30), "white")
+        cell.paste(im, ((t - im.width) // 2, 30 + (t - im.height) // 2))
+        d = ImageDraw.Draw(cell)
+        d.text((8, 4), str(n), fill=(0, 0, 0), font=font)
+        d.rectangle((0, 0, t - 1, t + 29), outline=(170, 170, 170))
+        tiles.append(cell)
+    per = CHECK_COLS * CHECK_ROWS
+    sheets = []
+    for i in range(0, len(tiles), per):
+        group = tiles[i:i + per]
+        rows = (len(group) + CHECK_COLS - 1) // CHECK_COLS
+        sheet = Image.new("RGB", (CHECK_COLS * t, rows * (t + 30)), "white")
+        for j, cell in enumerate(group):
+            sheet.paste(cell, ((j % CHECK_COLS) * t, (j // CHECK_COLS) * (t + 30)))
+        sheets.append(sheet)
+    return sheets
+
+
+def check_targets(job, scene):
+    """확인할 영역: 인물 부위에 든 영역 중 넓은 것부터. → [(지도 번호, 인물 id, 부위)]"""
+    owner = {}
+    for p in scene.get("people", []):
+        for part in p.get("parts", []):
+            for k in part.get("regions", []):
+                owner[int(k)] = (p["id"], part["part"])
+    ks = [k for k in owner if 0 < k < len(job.candidates) and job.areas[k - 1] >= CHECK_MIN_AREA]
+    ks.sort(key=lambda k: -job.areas[k - 1])
+    return [(k, *owner[k]) for k in ks[:CHECK_MAX]]
+
+
+def apply_check(scene, targets, items):
+    """영역 확인 답으로 인물 안에서 부위를 옮긴다 (머리카락↔피부↔옷처럼 크게 다를 때만). → 바꾼 내용 글"""
+    said = {int(it["tile"]): it["part"] for it in items}
+    people = {p["id"]: p for p in scene.get("people", [])}
+    changes = []
+    for n, (k, pid, part) in enumerate(targets, 1):
+        new = said.get(n)
+        if _coarse(new) is None or _coarse(part) is None or _coarse(new) == _coarse(part):
+            continue
+        person = people[pid]
+        for x in person["parts"]:
+            if x["part"] == part and k in x["regions"]:
+                x["regions"].remove(k)
+        dest = next((x for x in person["parts"] if x["part"] == new), None)
+        if dest is None:
+            dest = {"part": new, "regions": []}
+            person["parts"].append(dest)
+        dest["regions"].append(k)
+        changes.append(f"{k}번 {part}→{new}")
+    return changes
+
+
 def _sub(job, ref_images, map_images, prompt, schema, map_label="[원고 지도]"):
     return Job(job.candidates, job.palette, ref_images, map_images, prompt, schema, palette_text=job.palette_text,
                groups=job.groups, areas=job.areas, map_label=map_label, occlusion_text=job.occlusion_text,
-               full_map=job.full_map, kmap=job.kmap)
+               full_map=job.full_map, kmap=job.kmap, boundary=job.boundary)
 
 
-def ask_structured(job, provider, api_key, model, zoom=True, say=None):
-    """API로 장면 이해 → (인물별 확대 보정) → 색 정하기를 차례로 묻는다. → 한 번에 답하는 형식의 답"""
+def ask_structured(job, provider, api_key, model, zoom=True, say=None, check=True):
+    """API로 장면 이해 → (인물별 확대 보정) → (영역 확인) → 색 정하기를 차례로 묻는다. → 한 번에 답하는 형식의 답"""
     say = say or (lambda msg: None)
     total = {"input": 0, "output": 0, "calls": 0, "model": model}
 
@@ -717,6 +818,19 @@ def ask_structured(job, provider, api_key, model, zoom=True, say=None):
         fixed = {p["id"]: p for p in z.get("people", [])}
         scene["people"] = [fixed.get(p["id"], p) for p in scene.get("people", [])]
         crops = person_crops(job, scene)
+    changes = []
+    targets = check_targets(job, scene) if check else []
+    if targets:
+        # 번호 지도에서 번호와 칸을 잘못 짝짓는 실수(머리카락 덩어리를 피부로 등)를 영역 하나씩 강조한 그림으로 다시 묻는다
+        say("AI 영역 확인 중")
+        job.check_images = region_tiles(job, [k for k, _, _ in targets])
+        cats = PARTS + OTHER
+        item = _obj({"tile": {"type": "integer"}, "part": {"type": "string", "enum": cats}})
+        schema = _obj({"items": {"type": "array", "items": item}})
+        res = run(_sub(job, [], job.check_images,
+                       CHECK_PROMPT.format(cats=", ".join(cats), count=len(targets)), schema, "[영역 확인]"))
+        changes = apply_check(scene, targets, res.get("items", []))
+        crops = person_crops(job, scene)
     say("AI 색 정하는 중")
     ids = [p["id"] for p in job.palette]
     colors = run(_sub(job, job.ref_images, [im for _, im in crops],
@@ -729,6 +843,8 @@ def ask_structured(job, provider, api_key, model, zoom=True, say=None):
         for part in p.get("parts", []):
             part["palette"] = pick.get((p["id"], part["part"]), "none")
     scene["analysis"] = f"{scene.get('analysis', '')}\n\n[색] {colors.get('analysis', '')}".strip()
+    if targets:
+        scene["analysis"] += f"\n\n[영역 확인] {len(targets)}곳 확인, " + (", ".join(changes) if changes else "바꾼 곳 없음")
     job.usage = total
     return scene
 

@@ -951,6 +951,9 @@ class MainWindow(QMainWindow):
         self.ai_zoom = QCheckBox("인물마다 크게 잘라 부위를 다시 검토 (요청 1회 추가)")
         self.ai_zoom.setChecked(s.value("ai_zoom", True, bool))
         add("인물 확대", self.ai_zoom)
+        self.ai_check = QCheckBox("영역을 하나씩 강조해 머리카락·피부·옷을 다시 확인 (요청 1회 추가)")
+        self.ai_check.setChecked(s.value("ai_check", True, bool))
+        add("영역 확인", self.ai_check)
         add("제공자", self.provider)
         add("모델", hbox(self.model, self.list_btn))
         add("API 키", hbox(self.api_key, self.test_btn))
@@ -996,6 +999,7 @@ class MainWindow(QMainWindow):
         s.setValue("ai_mode", self.ai_mode.currentData())
         s.setValue("ai_review", self.ai_review.isChecked())
         s.setValue("ai_zoom", self.ai_zoom.isChecked())
+        s.setValue("ai_check", self.ai_check.isChecked())
         s.setValue(f"model_{pid}", self.model.currentText())
         self.save_api_key()
 
@@ -1013,6 +1017,7 @@ class MainWindow(QMainWindow):
             ai_key=self.api_key.text().strip(),
             ai_review=self.ai_review.isChecked(),
             ai_zoom=self.ai_zoom.isChecked(),
+            ai_check=self.ai_check.isChecked(),
             extra_boundary=patterns(self.boundary),
             background=patterns(self.background),
             hide_background=self.hide_bg.isChecked(),

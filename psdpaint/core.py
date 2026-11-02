@@ -27,6 +27,7 @@ class Options:
     ai_review: bool = False             # 칠한 결과를 AI가 한 번 더 보고 틀린 곳을 고친다 (요청 1회 추가).
                                         # 구조화 매칭에서는 없는 오류를 지어내 오히려 망치는 일이 있어 기본으로 끈다
     ai_zoom: bool = True                # 인물마다 크게 잘라 부위 나누기를 다시 검토한다 (요청 1회 추가)
+    ai_check: bool = True               # 넓은 영역을 하나씩 강조해 머리카락·피부·옷을 다시 확인한다 (요청 1회 추가)
     extra_boundary: list = field(default_factory=lambda: ["컷*", "*테두리*"])  # 경계로 쓸 픽셀 레이어 이름 패턴
     output_group: str = "밑색"
     gap_close_px: int = 2       # 선을 이만큼 두껍게 해서 작은 틈을 막는다
@@ -589,7 +590,7 @@ def ai_match(mismatch, labels, n, boundary, frame, opts, out_path, say):
         say(f"AI 매칭 중 (영역 {len(cand)}개)", 0.4)
         try:
             # 장면 이해(인물·부위) → 인물별 확대 검토 → 인물×부위 색을 차례로 묻는다
-            raw = match.ask_structured(job, opts.ai_provider, opts.ai_key, opts.ai_model, zoom=opts.ai_zoom,
+            raw = match.ask_structured(job, opts.ai_provider, opts.ai_key, opts.ai_model, zoom=opts.ai_zoom, check=opts.ai_check,
                                        say=lambda msg: say(msg, 0.45))
             usage = dict(job.usage)
             answer = match.structured_to_assignments(job, raw)
@@ -608,6 +609,8 @@ def ai_match(mismatch, labels, n, boundary, frame, opts, out_path, say):
         # answer.json을 고친 뒤 'AI 매칭: 요청 폴더' 방식으로 다시 실행하면 고친 답을 쓴다
         folder = Path(out_path).with_name(Path(out_path).stem + "_AI매칭")
         match.save_job(job, folder)
+        for i, im in enumerate(job.check_images, 1):
+            im.save(folder / f"check_{i}.png")
         (folder / "answer.json").write_text(json.dumps(answer, ensure_ascii=False, indent=1))
     answer = match.fill_group_gaps(job, answer)
     # 칠한 결과 지도(번호 + 칠한 색)를 남긴다. 사람이나 MCP 클라이언트의 AI가 보고 검수한다

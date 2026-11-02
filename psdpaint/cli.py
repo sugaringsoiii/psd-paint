@@ -35,6 +35,7 @@ def main(argv=None):
                     help="다른 페이지 레퍼런스 처리: api(Claude API) · files(요청 폴더 만들기) · off")
     ap.add_argument("--ai-model", default=Options.ai_model)
     ap.add_argument("--no-zoom", action="store_true", help="인물별 확대 검토를 하지 않는다 (요청 1회 절약)")
+    ap.add_argument("--no-check", action="store_true", help="영역을 하나씩 강조해 다시 확인하지 않는다 (요청 1회 절약)")
     ap.add_argument("--review", action="store_true", help="AI 매칭 결과를 한 번 더 검수한다 (요청 1회 추가)")
     ap.add_argument("--gap", type=int, default=Options.gap_close_px, help="선 틈 닫기 px")
     args = ap.parse_args(argv)
@@ -48,6 +49,7 @@ def main(argv=None):
         opts.hint_path = args.ref_image or args.ref_psd
     opts.ai_mode, opts.ai_model, opts.ai_review = args.ai, args.ai_model, args.review
     opts.ai_zoom = not args.no_zoom
+    opts.ai_check = not args.no_check
     if args.ai == "api":
         from . import ai
         opts.ai_key = os.environ.get("ANTHROPIC_API_KEY") or ai.get_key("claude")
