@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 import threading
 
 from . import __version__, ai, characters, clients, style, updater
-from .palette import read_palette, write_aco, write_ase
+from .palette import read_palette, write_aco, write_ase, write_cls
 from .widgets import (MOD, ColorPicker, Combo, Dialog, RoundScroll, Tip, button, card, color_field,
                       Popup, clear_layout, hbox0, icon, label, search_box,
                       to_hex)
@@ -311,7 +311,8 @@ class PresetsTab(QWidget):
                               "psd-paint 프리셋 파일(.psdpaint)의 색을 한 번에 추가합니다.")
         import_btn.clicked.connect(self.import_palette)
         export_btn = button("내보내기", "ghost", "upload")
-        export_btn.setToolTip("체크한 프리셋(없으면 전부)을 파일로 저장합니다.")
+        export_btn.setToolTip("체크한 프리셋(없으면 전부)을 파일로 저장합니다.\n"
+                              "psd-paint 프리셋(캐릭터 포함)·클립스튜디오 컬러 세트·포토샵 색상 견본")
         export_btn.clicked.connect(self.export_palette)
         self.characters_tab = None  # MainWindow가 넣는다 (프리셋 파일에 캐릭터도 함께 담는다)
         top = QHBoxLayout()
@@ -474,10 +475,11 @@ class PresetsTab(QWidget):
             return
         path, filt = QFileDialog.getSaveFileName(
             self, "프리셋 내보내기", str(Path(self.settings.value("last_dir", "")) / "psd-paint 프리셋.psdpaint"),
-            "psd-paint 프리셋 — 캐릭터 포함 (*.psdpaint);;포토샵 색상 견본 (*.aco);;Adobe Swatch Exchange (*.ase)")
+            "psd-paint 프리셋 — 캐릭터 포함 (*.psdpaint);;클립스튜디오 컬러 세트 (*.cls);;"
+            "포토샵 색상 견본 (*.aco);;Adobe Swatch Exchange (*.ase)")
         if not path:
             return
-        ext = {"psdpaint": ".psdpaint", "aco": ".aco", "ase": ".ase"}
+        ext = {"psdpaint": ".psdpaint", "cls": ".cls", "aco": ".aco", "ase": ".ase"}
         kind = next((k for k in ext if path.lower().endswith(ext[k])), next(k for k in ext if k in filt))
         if not path.lower().endswith(ext[kind]):
             path += ext[kind]
@@ -486,6 +488,8 @@ class PresetsTab(QWidget):
             if kind == "psdpaint":
                 profiles = self.characters_tab.profiles if self.characters_tab else []
                 characters.export_bundle(path, chosen, profiles)
+            elif kind == "cls":
+                write_cls(path, colors)
             elif kind == "aco":
                 write_aco(path, colors)
             else:

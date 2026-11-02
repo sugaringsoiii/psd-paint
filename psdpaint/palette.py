@@ -171,3 +171,29 @@ def write_ase(path, colors):
         body += struct.pack(">H", 2)  # 2 = 일반 색
         out += struct.pack(">HI", 1, len(body)) + body
     Path(path).write_bytes(out)
+
+
+def cls_bytes(title, entries, version=b"\x00\x01"):
+    """클립스튜디오 컬러 세트 바이트. entries: [(rgba 4바이트, 이름 또는 None)]
+
+    머리 = 이름 길이(2) + 이름(CP949) + 0(4) + 이름 길이(2) + 이름(UTF-8).
+    색마다 길이(4) + RGBA(4) + 이름 있음(4) [+ 이름 바이트 수(2) + UTF-16 이름].
+    """
+    ansi = title.encode("cp949", errors="replace")
+    utf8 = title.encode("utf-8")
+    head = struct.pack("<H", len(ansi)) + ansi + b"\0\0\0\0" + struct.pack("<H", len(utf8)) + utf8
+    body = b""
+    for rgba, name in entries:
+        e = bytes(rgba) + struct.pack("<I", 1 if name else 0)
+        if name:
+            text = name.encode("utf-16-le")
+            e += struct.pack("<H", len(text)) + text
+        body += struct.pack("<I", len(e)) + e
+    return (b"SLCC" + version + struct.pack("<I", len(head)) + head
+            + struct.pack("<III", 4, len(entries), len(body)) + body)
+
+
+def write_cls(path, colors, title=None):
+    """클립스튜디오 컬러 세트 .cls. colors: [(이름, (r, g, b))]. 세트 이름은 파일 이름."""
+    title = title or Path(path).stem
+    Path(path).write_bytes(cls_bytes(title, [(bytes((*rgb, 255)), name) for name, rgb in colors]))
