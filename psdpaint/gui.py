@@ -706,8 +706,9 @@ class GuideTab(QWidget):
         self.guide_where.setWordWrap(True)
         place = QHBoxLayout()
         place.addWidget(self.guide_where, 1)
-        self.guide_move = QPushButton("작품 폴더에 두기")
-        self.guide_move.setToolTip("작품 가이드를 고른 폴더에 '작품 가이드.md'로 저장합니다.")
+        self.guide_move = QPushButton("작품 폴더 고르기…")
+        self.guide_move.setToolTip("이 가이드를 쓸 작품 폴더(예: 귀농귀촌)를 고르면 그 폴더에 저장되고,\n"
+                                   "그 안의 모든 화·페이지 원고가 같은 가이드를 씁니다.")
         self.guide_move.clicked.connect(self.choose_guide_folder)
         place.addWidget(self.guide_move)
         self.guide = QPlainTextEdit()
@@ -739,8 +740,8 @@ class GuideTab(QWidget):
             self.guide.setPlainText("")
         self.guide.blockSignals(False)
         shared = path.parent == characters.data_dir()
-        self.guide_where.setText(("공용 작품 가이드 (작품 폴더에 따로 두지 않았어요)" if shared
-                                  else f"작품 가이드 파일: {path}"))
+        self.guide_where.setText("저장 위치: 이 컴퓨터 공용 — 작품 폴더를 고르면 그 작품 전용 가이드가 돼요" if shared
+                                 else f"저장 위치: '{path.parent.name}' 작품 폴더")
 
     def choose_guide_folder(self):
         start = str(self.work_folder or Path.home())
@@ -757,7 +758,7 @@ class GuideTab(QWidget):
             self.guide.blockSignals(True)
             self.guide.setPlainText(dest.read_text())
             self.guide.blockSignals(False)
-            self.guide_where.setText(f"작품 가이드 파일: {dest}")
+            self.guide_where.setText(f"저장 위치: '{dest.parent.name}' 작품 폴더")
 
     def send_suggestion(self):
         """고친 기록과 작품 가이드 메모를 보여 주고, 확인하면 GitHub 이슈 작성 화면을 연다 (자동으로 보내지 않는다)."""
@@ -767,6 +768,7 @@ class GuideTab(QWidget):
         fv = QVBoxLayout(form)
         fv.setContentsMargins(0, 0, 0, 0)
         text = QPlainTextEdit(characters.suggestion_text(self.guide_file))
+        text.setObjectName("guideEdit")
         text.setMinimumHeight(260)
         fv.addWidget(text)
         dlg = Dialog(self, "개선 제안 보내기",
