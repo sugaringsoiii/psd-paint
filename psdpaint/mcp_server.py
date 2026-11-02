@@ -33,14 +33,6 @@ server = MCPServer(
 )
 
 
-def _png(im, width=480):
-    if im.width > width:  # 대화에 넣는 미리보기는 작게
-        im = im.resize((width, round(im.height * width / im.width)))
-    buf = io.BytesIO()
-    im.convert("RGB").save(buf, "PNG", optimize=True)
-    return Image(data=buf.getvalue(), format="png")
-
-
 def _partial(folder):
     """판마다 받은 칸 답 (전부 모이기 전)."""
     try:
@@ -68,6 +60,29 @@ def _tile_sheet(folder, got):
         out += [f"[등장인물 {name}]", Image(path=folder / f"profile_{i}.png")]
     out += [f"[영역 확인 {todo}]", Image(path=folder / f"tiles_{todo}.png"), prompt]
     return out
+
+
+def _preview_images(result, width=720, max_h=1400):
+    """칠한 결과 미리보기. PSD 옆에 PNG로 저장하고(어느 앱에서든 열어 볼 수 있게),
+    대화에는 컷이 잘 보이게 세로로 나눠 넣는다 (긴 웹툰 페이지를 한 장으로 줄이면 알아보기 어렵다)."""
+    im = result.preview.convert("RGB")
+    path = Path(result.out_path).with_name(Path(result.out_path).stem + "_미리보기.png")
+    try:
+        im.save(path)
+        note = (f"미리보기 그림: {path}\n![밑색 미리보기]({path.as_uri()})\n"
+                "사용자에게 이 미리보기 그림을 보여 주세요 (PSD를 열지 않아도 결과를 볼 수 있게).")
+    except OSError:
+        note = ""
+    if im.width > width:
+        im = im.resize((width, round(im.height * width / im.width)))
+    parts = []
+    for y in range(0, im.height, max_h):
+        piece = im.crop((0, y, im.width, min(im.height, y + max_h)))
+        if piece.convert("L").getextrema()[0] < 250:  # 빈 여백 조각은 넣지 않는다
+            buf = io.BytesIO()
+            piece.save(buf, "PNG", optimize=True)
+            parts.append(Image(data=buf.getvalue(), format="png"))
+    return ([note] if note else []) + parts
 
 
 def _summary(result):
@@ -119,7 +134,7 @@ def _run(psd_path, out_path, opts):
         return out
     except PaintError as e:
         return f"실패: {e}"
-    out = [_summary(result), _png(result.preview)]
+    out = [_summary(result)] + _preview_images(result)
     folder = _job_folder(out_path)
     # 이번 실행이 만든 결과 지도만 (예전 실행이 남긴 그림을 이번 결과로 보이지 않게)
     results = sorted(p for p in folder.glob("result_*.png") if p.stat().st_mtime >= started) if folder.exists() else []
