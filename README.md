@@ -112,6 +112,11 @@ AI에 묻는 방법은 두 가지다.
 
 ## MCP 서버 (구독으로 AI 매칭)
 
+앱 설정의 **칠하는 곳**에서 Claude 데스크톱·Codex(ChatGPT 앱)·Gemini CLI를 고르면, [연결하기]가 각 앱 설정에 psd-paint를 등록하고
+(`claude_desktop_config.json`, `~/.codex/config.toml`, `~/.gemini/settings.json`, 원래 파일은 `.bak`으로 남긴다),
+[밑색 칠하기]가 칠할 파일이 적힌 요청을 넣어 그 앱을 연다 (`claude://claude.ai/new?q=…`, `codex://new?prompt=…&path=…`, 터미널에서 `gemini -i …`).
+요청은 입력창에 들어가기만 하고 보내지는 않는다. 코드는 `psdpaint/clients.py`.
+
 Claude 데스크톱·Claude Code에 psd-paint를 커넥터로 붙이면 API 키 없이 쓸 수 있다. 다른 페이지 레퍼런스는 클라이언트의 AI가 지도 이미지를 보고 직접 영역을 맞춘다.
 
 | 도구 | 하는 일 |

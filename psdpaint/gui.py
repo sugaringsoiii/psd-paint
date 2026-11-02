@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 
 import threading
 
-from . import __version__, ai, characters, style, updater
+from . import __version__, ai, characters, clients, style, updater
 from .palette import read_palette
 from .widgets import (MOD, ColorPicker, Combo, Dialog, RoundScroll, Tip, button, card, color_field,
                       Popup, clear_layout, hbox0, icon, label, search_box,
@@ -937,9 +937,23 @@ class MainWindow(QMainWindow):
             src_group.addButton(b)
         # 예전 레퍼런스 이미지·PSD 방식은 앱에서 뺐다 (결과가 나쁘고 요청만 많았다) → 참고 레이어로 돌린다
         (self.src_chars if s.value("hint_source", "layer") == "characters" else self.src_layer).setChecked(True)
+        self.paint_via = Combo()
+        for text, key in (("Claude 데스크톱 — 구독, API 키 없음", "claude"), ("Codex (ChatGPT 앱)", "codex"),
+                          ("Gemini CLI", "gemini"), ("이 앱에서 바로 — API 키, 요금 발생", "api")):
+            self.paint_via.addItem(text, key)
+        self.paint_via.setCurrentIndex(max(0, self.paint_via.findData(s.value("paint_via", "claude"))))
+        self.paint_via.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.paint_via.setMinimumContentsLength(8)
+        self.via_status = label("", "summary")
+        self.via_connect = QPushButton("연결하기")
+        self.via_connect.setToolTip("psd-paint를 이 AI 앱의 MCP 서버로 등록합니다. 등록한 뒤 그 앱을 껐다 켜야 합니다.")
+        self.via_connect.clicked.connect(self.connect_client)
+        self.via_note = label("[밑색 칠하기]를 누르면 이 앱이 열리고, 칠할 파일이 적힌 요청이 입력창에 들어가요. "
+                              "확인하고 보내면 AI가 칠해요.", "summary")
+        self.via_note.setWordWrap(True)
         self.parts_method = Combo()
-        for text, key in (("영역 확인 칸 — Claude 등 글 AI만으로", "tiles"),
-                          ("Gemini 이미지 지도 — 더 정확, Gemini 키 필요", "image")):
+        for text, key in (("영역 확인 칸 — AI가 칸마다 답함 (기본)", "tiles"),
+                          ("Gemini 이미지 지도 — Gemini 키 필요", "image")):
             self.parts_method.addItem(text, key)
         self.parts_method.setCurrentIndex(max(0, self.parts_method.findData(s.value("parts_method", "tiles"))))
         self.parts_method.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -949,6 +963,16 @@ class MainWindow(QMainWindow):
         self.looks_note.setWordWrap(True)
         section("참고 방식")
         add("방식", vbox(self.src_layer, self.src_chars), top=True)
+        add("칠하는 곳", self.paint_via)
+        via_label = grid.itemAtPosition(row - 1, 0).widget()
+        conn = QHBoxLayout()
+        conn.setSpacing(8)
+        conn.addWidget(self.via_status, 1)
+        conn.addWidget(self.via_connect)
+        add("연결", conn)
+        conn_label = grid.itemAtPosition(row - 1, 0).widget()
+        add("", self.via_note)
+        self.via_rows = (conn_label, self.via_status, self.via_connect, self.via_note)
         add("부위 나누기", self.parts_method)
         parts_label = grid.itemAtPosition(row - 1, 0).widget()
         self.tile_min = spin(100, 20000, s.value("tile_min_area", Options.tile_min_area, int), " px")
@@ -961,8 +985,10 @@ class MainWindow(QMainWindow):
         self.tile_auto_bg.setChecked(s.value("tile_auto_bg", True, bool))
         add("", self.tile_auto_bg)
         add("", self.looks_note)
-        self.looks_row = (self.parts_method, parts_label, self.tile_min, tile_label, self.tile_auto_bg, self.looks_note)
+        self.looks_row = (self.paint_via, via_label, self.parts_method, parts_label, self.tile_min, tile_label,
+                          self.tile_auto_bg, self.looks_note)
         self.parts_method.currentIndexChanged.connect(self.update_image_model)
+        self.paint_via.currentIndexChanged.connect(self.update_via)
         for b in (self.src_layer, self.src_chars):
             b.toggled.connect(self.update_ref_enabled)
         self.update_ref_enabled()
@@ -1061,21 +1087,15 @@ class MainWindow(QMainWindow):
         self.ai_status.setWordWrap(True)
         self.provider.currentIndexChanged.connect(self.load_provider)
         self.api_key.editingFinished.connect(self.save_api_key)
-        self.ai_mode = Combo()
-        for text, mode in (("API로 바로 매칭", "api"), ("요청 폴더 만들기 (Claude Code·Codex에서 답하기)", "files"),
-                           ("끄기", "off")):
-            self.ai_mode.addItem(text, mode)
-        self.ai_mode.setCurrentIndex(max(0, self.ai_mode.findData(s.value("ai_mode", "api"))))
-        section("AI 연결 (선택)")
+        ai_first = row  # 이 줄부터 AI 연결 섹션 (이 앱에서 바로 칠하거나 Gemini 이미지 지도를 쓸 때만 보인다)
+        section("AI 연결")
         # 긴 항목 때문에 설정 탭이 넓어지지 않게 콤보박스는 내용 폭에 맞추지 않는다
-        for combo in (self.ai_mode, self.provider, self.model):
+        for combo in (self.provider, self.model):
             combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(8)
             combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        add("AI 매칭", self.ai_mode)
-        ai_first = row  # 이 줄부터 AI 연결 세부 설정 (AI 매칭이 '끄기'면 가린다)
-        cost_note = label("API로 바로 매칭하면 요청마다 선택한 제공자의 API 사용 요금이 청구될 수 있습니다. "
-                          "Claude 데스크톱(MCP)으로 쓰면 API 키 없이 구독으로 됩니다.", "summary")
+        cost_note = label("이 앱에서 바로 칠하면 요청마다 선택한 제공자의 API 사용 요금이 청구될 수 있습니다. "
+                          "Gemini 이미지 지도는 제공자와 상관없이 Gemini 키를 씁니다.", "summary")
         cost_note.setWordWrap(True)
         add("", cost_note)
         self.image_model = Combo()
@@ -1092,8 +1112,8 @@ class MainWindow(QMainWindow):
         add("", self.ai_status)
         self.ai_rows = [item.widget() or item.layout() for r in range(ai_first, row) for c in (0, 1)
                         if (item := grid.itemAtPosition(r, c)) is not None]
-        self.ai_mode.currentIndexChanged.connect(self.update_ai_rows)
-        self.update_ai_rows()
+        self.parts_method.currentIndexChanged.connect(self.update_ai_rows)
+        self.update_via()
         self.ai_test_done.connect(self.on_ai_test)
         self.models_loaded.connect(self.on_models_loaded)
         self.load_provider()
@@ -1135,7 +1155,7 @@ class MainWindow(QMainWindow):
         s.setValue("image_model", self.image_model.currentData())
         pid = self.provider.currentData()
         s.setValue("provider", pid)
-        s.setValue("ai_mode", self.ai_mode.currentData())
+        s.setValue("paint_via", self.paint_via.currentData())
         s.setValue(f"model_{pid}", self.model.currentText())
         self.save_api_key()
 
@@ -1146,7 +1166,7 @@ class MainWindow(QMainWindow):
             line_group=self.line_group.text().strip() or "선화",
             hint_group=self.hint_group.text().strip() or "참고",
             hint_source=self.hint_source(),
-            ai_mode=self.ai_mode.currentData(),
+            ai_mode="api" if self.paint_via.currentData() == "api" else "off",
             ai_provider=self.provider.currentData(),
             ai_model=self.model.currentText().strip() or ai.PROVIDERS[self.provider.currentData()]["model"],
             ai_key=self.api_key.text().strip(),
@@ -1173,10 +1193,15 @@ class MainWindow(QMainWindow):
     def update_ref_enabled(self):
         for widget in self.looks_row:
             widget.setVisible(self.src_chars.isChecked())
+        if hasattr(self, "via_rows"):
+            self.update_via()
 
     def update_ai_rows(self):
-        """AI 매칭이 '끄기'면 AI 연결 세부 설정을 가린다."""
-        on = self.ai_mode.currentData() != "off"
+        """AI 연결 섹션은 캐릭터 방식을 이 앱에서 바로 칠하거나 Gemini 이미지 지도를 쓸 때만 보인다."""
+        if not hasattr(self, "ai_rows"):  # 설정 화면을 만드는 중
+            return
+        on = self.src_chars.isChecked() and (self.paint_via.currentData() == "api"
+                                             or self.parts_method.currentData() == "image")
         for it in self.ai_rows:
             if isinstance(it, QWidget):
                 it.setVisible(on)
@@ -1184,6 +1209,55 @@ class MainWindow(QMainWindow):
                 for i in range(it.count()):
                     if (w := it.itemAt(i).widget()) is not None:
                         w.setVisible(on)
+
+    def update_via(self):
+        """칠하는 곳에 따라 연결 상태를 보이고, AI 연결 섹션을 보이거나 가린다."""
+        via = self.paint_via.currentData()
+        mcp = self.src_chars.isChecked() and via in clients.CLIENTS
+        for widget in self.via_rows:
+            widget.setVisible(mcp)
+        if mcp:
+            name = clients.CLIENTS[via]
+            if not clients.installed(via):
+                self.via_status.setText(f"✕ {name}가 설치돼 있지 않아요")
+                self.via_connect.setEnabled(False)
+            elif clients.registered(via):
+                self.via_status.setText(f"✓ {name}에 연결됨")
+                self.via_connect.setEnabled(True)
+                self.via_connect.setText("다시 연결")
+            else:
+                self.via_status.setText(f"아직 {name}에 연결하지 않았어요")
+                self.via_connect.setEnabled(True)
+                self.via_connect.setText("연결하기")
+        self.update_ai_rows()
+
+    def open_in_client(self, files):
+        """캐릭터 방식을 AI 앱(MCP)에서 칠한다: 칠할 파일이 적힌 요청을 넣어 그 앱을 연다."""
+        via = self.paint_via.currentData()
+        name = clients.CLIENTS[via]
+        if not clients.installed(via):
+            Dialog(self, f"{name}가 설치돼 있지 않아요", "설정 → 칠하는 곳에서 다른 앱을 고르세요.", cancel=False).exec()
+            return
+        if not clients.registered(via):
+            if not Dialog(self, f"psd-paint를 {name}에 연결할까요?",
+                          f"연결한 뒤 {name}를 완전히 껐다 켜야 psd-paint가 보입니다. 다시 켠 뒤 [밑색 칠하기]를 누르세요.").exec():
+                return
+            clients.register(via)
+            self.update_via()
+            return
+        clients.launch(via, clients.prompt_for(files), Path(files[0]).parent if files else None)
+        self.log.appendPlainText(f"── {name}에 {len(files)}개 파일 칠하기 요청을 넣었어요. {name}에서 확인하고 보내세요.")
+
+    def connect_client(self):
+        via = self.paint_via.currentData()
+        name = clients.CLIENTS[via]
+        try:
+            clients.register(via)
+        except OSError as e:
+            Dialog(self, "연결하지 못했어요", str(e), cancel=False).exec()
+            return
+        self.update_via()
+        Dialog(self, f"{name}에 연결했어요", f"{name}를 완전히 껐다 켜야 psd-paint가 보입니다.", cancel=False).exec()
 
     def update_image_model(self):
         tiles = self.parts_method.currentData() == "tiles"
@@ -1350,6 +1424,9 @@ class MainWindow(QMainWindow):
             Dialog(self, "결과 폴더를 지정하세요.", "설정 탭의 결과 폴더에서 고를 수 있습니다.", cancel=False).exec()
             return
         self.save_settings()
+        if self.src_chars.isChecked() and self.paint_via.currentData() in clients.CLIENTS:
+            self.open_in_client([self.files.topLevelItem(r).data(COL_FILE, Qt.UserRole) for r in rows])
+            return
         out_dir = self.out_dir.text().strip() if self.other_dir.isChecked() else None
         jobs = []
         for row in rows:
