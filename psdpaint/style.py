@@ -175,7 +175,7 @@ QTabBar::tab {{
     border: none;
     color: {MUTED};
     padding: 8px 0;  /* 높이 32. 좌우 여백은 gui.py 탭 이름 위젯이 갖는다 */
-    margin-right: 4px;
+    margin-right: 0;
     border-radius: 6px;
 }}
 QTabBar::tab:selected {{ background: {SELECT}; color: {TEXT}; }}

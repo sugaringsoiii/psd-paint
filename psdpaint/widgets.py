@@ -15,7 +15,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
@@ -105,19 +105,32 @@ def button(text, kind=None, icon_name=None):
     return b
 
 
-def search_box(placeholder):
-    """돋보기 아이콘이 붙은 검색 입력칸."""
-    edit = QLineEdit()
-    edit.setObjectName("search")
-    edit.setPlaceholderText(placeholder)
-    edit.addAction(icon("search", style.FAINT, gap=0), QLineEdit.LeadingPosition)
-    # 지우기 버튼: Qt 기본(진한 회색) 대신 흐린 아이콘. 글자가 있을 때만 보인다
-    clear = edit.addAction(icon("clear", style.FAINT, gap=0), QLineEdit.TrailingPosition)
-    clear.setToolTip("지우기")
-    clear.setVisible(False)
-    clear.triggered.connect(edit.clear)
-    edit.textChanged.connect(lambda t: clear.setVisible(bool(t)))
-    return edit
+class SearchBox(QLineEdit):
+    """돋보기 아이콘이 붙은 검색 입력칸. 오른쪽 끝 28px 는 어디를 눌러도 지운다."""
+    CLEAR_W = 28  # Qt 기본 지우기 버튼은 높이 18px 이라 아이콘 위아래를 누르면 안 먹는다
+
+    def __init__(self, placeholder):
+        super().__init__()
+        self.setObjectName("search")
+        self.setPlaceholderText(placeholder)
+        self.addAction(icon("search", style.FAINT, gap=0), QLineEdit.LeadingPosition)
+        # 지우기 버튼은 Qt 기본 동작을 그대로 쓰고 아이콘만 흐린 것으로 바꾼다 (기본은 진한 회색)
+        self.setClearButtonEnabled(True)
+        self.findChild(QAction, "_q_qlineeditclearaction").setIcon(icon("clear", style.FAINT, gap=0))
+
+    def mousePressEvent(self, e):
+        if self.text() and e.position().x() >= self.width() - self.CLEAR_W:
+            self.clear()
+            return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):  # 지우는 자리에서는 손 모양 커서
+        on = self.text() and e.position().x() >= self.width() - self.CLEAR_W
+        self.setCursor(Qt.PointingHandCursor if on else Qt.IBeamCursor)
+        super().mouseMoveEvent(e)
+
+
+search_box = SearchBox
 
 
 def swatch(rgb, size=14):
